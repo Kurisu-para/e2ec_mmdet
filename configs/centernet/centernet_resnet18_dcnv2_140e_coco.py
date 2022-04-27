@@ -6,19 +6,19 @@ _base_ = [
 model = dict(
     type='CenterNet',
     backbone=dict(
-        type='ResNet',
+        type='ResNet', #mmdetection/mmdet/models/backbones/resnet.py
         depth=18,
         norm_eval=False,
         norm_cfg=dict(type='BN'),
         init_cfg=dict(type='Pretrained', checkpoint='torchvision://resnet18')),
     neck=dict(
-        type='CTResNetNeck',
-        in_channel=512,
-        num_deconv_filters=(256, 128, 64),
+        type='CTResNetNeck', #mmdetection/mmdet/models/necks/ct_resnet_neck.py
+        in_channel=512, # [256,512,1024,2048]选一个
+        num_deconv_filters=(256, 128, 64), # 通道数
         num_deconv_kernels=(4, 4, 4),
         use_dcn=True),
     bbox_head=dict(
-        type='CenterNetHead',
+        type='CenterNetHead', # mmdetection/mmdet/models/dense_heads/centernet_head.py
         num_classes=80,
         in_channel=64,
         feat_channel=64,
@@ -86,7 +86,9 @@ test_pipeline = [
 ]
 
 dataset_type = 'CocoDataset'
-data_root = 'data/coco/'
+# data_root = 'data/coco/'
+data_root = '/home/sjtu/scratch/tongzhao/e2ec/data/coco/'
+
 
 # Use RepeatDataset to speed up training
 data = dict(
@@ -101,8 +103,16 @@ data = dict(
             ann_file=data_root + 'annotations/instances_train2017.json',
             img_prefix=data_root + 'train2017/',
             pipeline=train_pipeline)),
-    val=dict(pipeline=test_pipeline),
-    test=dict(pipeline=test_pipeline))
+    val=dict(
+            type=dataset_type,
+            ann_file=data_root + 'annotations/instances_val2017.json',
+            img_prefix=data_root + 'val2017/',
+            pipeline=test_pipeline),
+    test=dict(
+            type=dataset_type,
+            ann_file=data_root + 'annotations/instances_val2017.json',
+            img_prefix=data_root + 'val2017/',
+            pipeline=test_pipeline))
 
 # optimizer
 # Based on the default settings of modern detectors, the SGD effect is better

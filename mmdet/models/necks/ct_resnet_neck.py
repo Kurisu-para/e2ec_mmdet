@@ -22,9 +22,9 @@ class CTResNetNeck(BaseModule):
     """
 
     def __init__(self,
-                 in_channel,
-                 num_deconv_filters,
-                 num_deconv_kernels,
+                 in_channel, #512
+                 num_deconv_filters, #(256, 128, 64)
+                 num_deconv_kernels, #(4, 4, 4)
                  use_dcn=True,
                  init_cfg=None):
         super(CTResNetNeck, self).__init__(init_cfg)
@@ -91,4 +91,4 @@ class CTResNetNeck(BaseModule):
     def forward(self, inputs):
         assert isinstance(inputs, (list, tuple))
         outs = self.deconv_layers(inputs[-1])
-        return outs,
+        return outs

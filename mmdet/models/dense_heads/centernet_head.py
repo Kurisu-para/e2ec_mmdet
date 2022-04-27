@@ -6,7 +6,7 @@ from mmcv.ops import batched_nms
 from mmcv.runner import force_fp32
 
 from mmdet.core import multi_apply
-from mmdet.models import HEADS, build_loss
+from mmdet.models import HEADS, build_loss #去查一查有哪些loss
 from mmdet.models.utils import gaussian_radius, gen_gaussian_target
 from ..utils.gaussian_target import (get_local_maximum, get_topk_from_heatmap,
                                      transpose_and_gather_feat)
@@ -103,9 +103,9 @@ class CenterNetHead(BaseDenseHead, BBoxTestMixin):
 
         Returns:
             center_heatmap_pred (Tensor): center predict heatmaps, the
-               channels number is num_classes.
-            wh_pred (Tensor): wh predicts, the channels number is 2.
-            offset_pred (Tensor): offset predicts, the channels number is 2.
+               channels number is num_classes. [h/4,w/4,cls_nums]
+            wh_pred (Tensor): wh predicts, the channels number is 2. [h/4,w/4,2]
+            offset_pred (Tensor): offset predicts, the channels number is 2. [h/4,w/4,2]
         """
         center_heatmap_pred = self.heatmap_head(feat).sigmoid()
         wh_pred = self.wh_head(feat)
