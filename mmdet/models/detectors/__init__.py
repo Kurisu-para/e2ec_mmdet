@@ -7,6 +7,7 @@ from .centernet import CenterNet
 from .cornernet import CornerNet
 from .deformable_detr import DeformableDETR
 from .detr import DETR
+from .e2ec import E2EC
 from .fast_rcnn import FastRCNN
 from .faster_rcnn import FasterRCNN
 from .fcos import FCOS
@@ -42,7 +43,6 @@ from .yolact import YOLACT
 from .yolo import YOLOV3
 from .yolof import YOLOF
 from .yolox import YOLOX
-from .e2ec import E2EC
 
 __all__ = [
     'ATSS', 'BaseDetector', 'E2EC', 'SingleStageDetector', 'TwoStageDetector', 'RPN',

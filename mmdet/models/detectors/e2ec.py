@@ -28,6 +28,7 @@ class E2EC(SingleStageDetector):
                       img_metas,
                       gt_bboxes,
                       gt_labels,
+                      gt_semantic_seg,
                       gt_bboxes_ignore=None):
             """
             Args:
@@ -51,7 +52,7 @@ class E2EC(SingleStageDetector):
             x = self.extract_feat(img)
 
             losses = self.bbox_head.forward_train(x, img_metas, gt_bboxes,
-                                                gt_labels, gt_bboxes_ignore)
+                                                gt_labels, gt_semantic_seg, gt_bboxes_ignore)
             return losses
 
     def merge_aug_results(self, aug_results, with_nms):

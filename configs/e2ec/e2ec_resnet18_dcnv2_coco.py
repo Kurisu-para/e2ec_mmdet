@@ -6,7 +6,7 @@ _base_ = [
 ]
 
 model = dict(
-    type = 'CenterNet',
+    type = 'E2EC',
     backbone = dict(
         type = 'ResNet',
         depth = 18,
@@ -36,7 +36,7 @@ img_norm_cfg = dict(
 
 train_pipeline = [
     dict(type='LoadImageFromFile', to_float32=True, color_type='color'),
-    dict(type='LoadAnnotations', with_bbox=True),
+    dict(type='LoadAnnotations', with_bbox=True, with_seg=True),
     dict(
         type='PhotoMetricDistortion',
         brightness_delta=32,
@@ -55,7 +55,7 @@ train_pipeline = [
     dict(type='RandomFlip', flip_ratio=0.5),
     dict(type='Normalize', **img_norm_cfg),
     dict(type='DefaultFormatBundle'),
-    dict(type='Collect', keys=['img', 'gt_bboxes', 'gt_labels'])
+    dict(type='Collect', keys=['img', 'gt_bboxes', 'gt_labels', 'gt_semantic_seg'])
 ]
 
 test_pipeline = [

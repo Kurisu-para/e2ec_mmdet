@@ -1,6 +1,8 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import torch
 import torch.nn as nn
+import math
+import numpy as np
 from mmcv.cnn import bias_init_with_prob, normal_init
 from mmcv.ops import batched_nms
 from mmcv.runner import force_fp32
@@ -61,6 +63,374 @@ class Refine(nn.Module):  # cnn_feature, ct, init_polys, ct_img_idx.clone()
             coarse_polys = self.global_deform(feature_points, init_polys)
             return coarse_polys
 
+class Douglas:
+    D = 3
+    def sample(self, poly):
+        mask = np.zeros((poly.shape[0],), dtype=int)
+        mask[0] = 1
+        endPoint = poly[0: 1, :] + poly[-1:, :]
+        endPoint /= 2
+        poly_append = np.concatenate([poly, endPoint], axis=0)
+        self.compress(0, poly.shape[0], poly_append, mask)
+        return mask
+
+    def compress(self, idx1, idx2, poly, mask):
+        p1 = poly[idx1, :]
+        p2 = poly[idx2, :]
+        A = (p1[1] - p2[1])
+        B = (p2[0] - p1[0])
+        C = (p1[0] * p2[1] - p2[0] * p1[1])
+
+        m = idx1
+        n = idx2
+        if (n == m + 1):
+            return
+        d = abs(A * poly[m + 1: n, 0] + B * poly[m + 1: n, 1] + C) / math.sqrt(math.pow(A, 2) + math.pow(B, 2) + 1e-4)
+        max_idx = np.argmax(d)
+        dmax = d[max_idx]
+        max_idx = max_idx + m + 1
+
+        if dmax > self.D:
+            mask[max_idx] = 1
+            self.compress(idx1, max_idx, poly, mask)
+            self.compress(max_idx, idx2, poly, mask)
+
+class CircConv(nn.Module):
+    def __init__(self, state_dim, out_state_dim=None, n_adj=4):
+        super(CircConv, self).__init__()
+
+        self.n_adj = n_adj
+        out_state_dim = state_dim if out_state_dim is None else out_state_dim
+        self.fc = nn.Conv1d(state_dim, out_state_dim, kernel_size=self.n_adj*2+1)
+
+    def forward(self, input):
+        if self.n_adj != 0:
+            input = torch.cat([input[..., -self.n_adj:], input, input[..., :self.n_adj]], dim=2)
+        return self.fc(input)
+
+class DilatedCircConv(nn.Module):
+    def __init__(self, state_dim, out_state_dim=None, n_adj=4, dilation=1):   # state_dim=128, feature_dim=64+2, conv_type='dgrid'
+        super(DilatedCircConv, self).__init__()
+
+        self.n_adj = n_adj
+        self.dilation = dilation
+        out_state_dim = state_dim if out_state_dim is None else out_state_dim
+        self.fc = nn.Conv1d(state_dim, out_state_dim, kernel_size=self.n_adj*2+1, dilation=self.dilation)
+
+    def forward(self, input):
+        if self.n_adj != 0:
+            input = torch.cat([input[..., -self.n_adj*self.dilation:], input, input[..., :self.n_adj*self.dilation]], dim=2)
+        return self.fc(input)
+
+_conv_factory = {
+    'grid': CircConv,
+    'dgrid': DilatedCircConv
+}
+
+class BasicBlock(nn.Module):
+    def __init__(self, state_dim, out_state_dim, conv_type, n_adj=4, dilation=1):
+        super(BasicBlock, self).__init__()
+        if conv_type == 'grid':
+            self.conv = _conv_factory[conv_type](state_dim, out_state_dim, n_adj)
+        else:
+            self.conv = _conv_factory[conv_type](state_dim, out_state_dim, n_adj, dilation)
+        self.relu = nn.ReLU(inplace=True)
+        self.norm = nn.BatchNorm1d(out_state_dim)
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.relu(x)
+        x = self.norm(x)
+        return x
+
+class Snake(nn.Module):
+    def __init__(self, state_dim, feature_dim, conv_type='dgrid'):
+        super(Snake, self).__init__()
+        self.head = BasicBlock(feature_dim, state_dim, conv_type)
+        self.res_layer_num = 7
+        dilation = [1, 1, 1, 2, 2, 4, 4]
+        n_adj = 4
+        for i in range(self.res_layer_num):
+            if dilation[i] == 0:
+                conv_type = 'grid'
+            else:
+                conv_type = 'dgrid'
+            conv = BasicBlock(state_dim, state_dim, conv_type, n_adj=n_adj, dilation=dilation[i])
+            self.__setattr__('res'+str(i), conv)
+
+        fusion_state_dim = 256
+        
+        self.fusion = nn.Conv1d(state_dim * (self.res_layer_num + 1), fusion_state_dim, 1)
+        
+        self.prediction = nn.Sequential(
+            nn.Conv1d(state_dim * (self.res_layer_num + 1) + fusion_state_dim, 256, 1),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(256, 64, 1),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(64, 2, 1)
+        )
+
+    def forward(self, x):
+        states = []
+        x = self.head(x)
+        states.append(x)
+        for i in range(self.res_layer_num):
+            x = self.__getattr__('res'+str(i))(x) + x
+            states.append(x)
+
+        state = torch.cat(states, dim=1)
+        
+        global_state = torch.max(self.fusion(state), dim=2, keepdim=True)[0]
+        global_state = global_state.expand(global_state.size(0), global_state.size(1), state.size(2))
+        state = torch.cat([global_state, state], dim=1)
+        
+        x = self.prediction(state)
+
+        return x
+
+class Evolution(nn.Module):
+    def __init__(self, evole_ietr_num=3, evolve_stride=1., ro=4.):
+        super(Evolution, self).__init__()
+        assert evole_ietr_num >= 1
+        self.evolve_stride = evolve_stride
+        self.ro = ro
+        self.evolve_gcn = Snake(state_dim=128, feature_dim=64+2, conv_type='dgrid')
+        self.iter = evole_ietr_num - 1 # 2
+        for i in range(self.iter):
+            evolve_gcn = Snake(state_dim=128, feature_dim=64+2, conv_type='dgrid')
+            self.__setattr__('evolve_gcn'+str(i), evolve_gcn)
+
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d) or isinstance(m, nn.Conv2d):
+                m.weight.data.normal_(0.0, 0.01)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+    def prepare_training(self, output, batch):
+        init = prepare_training(output, batch, self.ro)
+        return init
+
+    def prepare_testing_init(self, output):
+        init = prepare_testing_init(output['poly_coarse'], self.ro)
+        return init
+
+    def prepare_testing_evolve(self, output, h, w):
+        img_init_polys = output['img_init_polys']
+        img_init_polys[..., 0] = torch.clamp(img_init_polys[..., 0], min=0, max=w-1)
+        img_init_polys[..., 1] = torch.clamp(img_init_polys[..., 1], min=0, max=h-1)
+        output.update({'img_init_polys': img_init_polys})
+        return img_init_polys
+    
+    def evolve_poly(self, snake, cnn_feature, i_it_poly, c_it_poly, ind, stride=1., ignore=False): #evolve_gcn, cnn_feature, py_pred, c_py_pred, init['py_ind'], stride=self.evolve_stride
+        if ignore:
+            return i_it_poly * self.ro
+        if len(i_it_poly) == 0:
+            return torch.zeros_like(i_it_poly)
+        h, w = cnn_feature.size(2), cnn_feature.size(3)
+        init_feature = get_gcn_feature(cnn_feature, i_it_poly, ind, h, w)
+        c_it_poly = c_it_poly * self.ro
+        init_input = torch.cat([init_feature, c_it_poly.permute(0, 2, 1)], dim=1)
+        offset = snake(init_input).permute(0, 2, 1)
+        i_poly = i_it_poly * self.ro + offset * stride
+        return i_poly
+
+    def foward_train(self, output, batch, cnn_feature):
+        ret = output
+        init = self.prepare_training(output, batch)
+        py_pred = self.evolve_poly(self.evolve_gcn, cnn_feature, init['img_init_polys'],
+                                   init['can_init_polys'], init['py_ind'], stride=self.evolve_stride)
+        py_preds = [py_pred]
+        for i in range(self.iter): #2
+            py_pred = py_pred / self.ro
+            c_py_pred = img_poly_to_can_poly(py_pred)
+            evolve_gcn = self.__getattr__('evolve_gcn' + str(i))
+            py_pred = self.evolve_poly(evolve_gcn, cnn_feature, py_pred, c_py_pred,
+                                       init['py_ind'], stride=self.evolve_stride)
+            py_preds.append(py_pred)
+        ret.update({'py_pred': py_preds, 'img_gt_polys': init['img_gt_polys'] * self.ro})
+        return output
+
+    def foward_test(self, output, cnn_feature, ignore):
+        ret = output
+        with torch.no_grad():
+            init = self.prepare_testing_init(output)
+            img_init_polys = self.prepare_testing_evolve(init, cnn_feature.size(2), cnn_feature.size(3))
+            py = self.evolve_poly(self.evolve_gcn, cnn_feature, img_init_polys, init['can_init_polys'], init['py_ind'],
+                                  ignore=ignore[0], stride=self.evolve_stride)
+            pys = [py, ]
+            for i in range(self.iter):
+                py = py / self.ro
+                c_py = img_poly_to_can_poly(py)
+                evolve_gcn = self.__getattr__('evolve_gcn' + str(i))
+                py = self.evolve_poly(evolve_gcn, cnn_feature, py, c_py, init['py_ind'],
+                                      ignore=ignore[i + 1], stride=self.evolve_stride)
+                pys.append(py)
+            ret.update({'py': pys})
+        return output
+
+    def forward(self, output, cnn_feature, batch=None, test_stage='final-dml'):
+        if batch is not None and 'test' not in batch['meta']:
+            self.foward_train(output, batch, cnn_feature)
+        else:
+            ignore = [False] * (self.iter + 1)
+            if test_stage == 'coarse' or test_stage == 'init':
+                ignore = [True for _ in ignore]
+            if test_stage == 'final':
+                ignore[-1] = True
+            self.foward_test(output, cnn_feature, ignore=ignore)
+        return output
+
+def uniformsample(pgtnp_px2, newpnum):
+    pnum, cnum = pgtnp_px2.shape
+    assert cnum == 2
+
+    idxnext_p = (np.arange(pnum, dtype=np.int32) + 1) % pnum
+    pgtnext_px2 = pgtnp_px2[idxnext_p]
+    edgelen_p = np.sqrt(np.sum((pgtnext_px2 - pgtnp_px2) ** 2, axis=1))
+    edgeidxsort_p = np.argsort(edgelen_p)
+
+    # two cases
+    # we need to remove gt points
+    # we simply remove shortest paths
+    if pnum > newpnum:
+        edgeidxkeep_k = edgeidxsort_p[pnum - newpnum:]
+        edgeidxsort_k = np.sort(edgeidxkeep_k)
+        pgtnp_kx2 = pgtnp_px2[edgeidxsort_k]
+        assert pgtnp_kx2.shape[0] == newpnum
+        return pgtnp_kx2
+    # we need to add gt points
+    # we simply add it uniformly
+    else:
+        edgenum = np.round(edgelen_p * newpnum / np.sum(edgelen_p)).astype(np.int32)
+        for i in range(pnum):
+            if edgenum[i] == 0:
+                edgenum[i] = 1
+
+        # after round, it may has 1 or 2 mismatch
+        edgenumsum = np.sum(edgenum)
+        if edgenumsum != newpnum:
+
+            if edgenumsum > newpnum:
+
+                id = -1
+                passnum = edgenumsum - newpnum
+                while passnum > 0:
+                    edgeid = edgeidxsort_p[id]
+                    if edgenum[edgeid] > passnum:
+                        edgenum[edgeid] -= passnum
+                        passnum -= passnum
+                    else:
+                        passnum -= edgenum[edgeid] - 1
+                        edgenum[edgeid] -= edgenum[edgeid] - 1
+                        id -= 1
+            else:
+                id = -1
+                edgeid = edgeidxsort_p[id]
+                edgenum[edgeid] += newpnum - edgenumsum
+
+        assert np.sum(edgenum) == newpnum
+
+        psample = []
+        for i in range(pnum):
+            pb_1x2 = pgtnp_px2[i:i + 1]
+            pe_1x2 = pgtnext_px2[i:i + 1]
+
+            pnewnum = edgenum[i]
+            wnp_kx1 = np.arange(edgenum[i], dtype=np.float32).reshape(-1, 1) / edgenum[i]
+
+            pmids = pb_1x2 * (1 - wnp_kx1) + pe_1x2 * wnp_kx1
+            psample.append(pmids)
+
+        psamplenp = np.concatenate(psample, axis=0)
+        return psamplenp
+
+def four_idx(img_gt_poly):
+    x_min, y_min = np.min(img_gt_poly, axis=0)
+    x_max, y_max = np.max(img_gt_poly, axis=0)
+    center = [(x_min + x_max) / 2., (y_min + y_max) / 2.]
+    can_gt_polys = img_gt_poly.copy()
+    can_gt_polys[:, 0] -= center[0]
+    can_gt_polys[:, 1] -= center[1]
+    distance = np.sum(can_gt_polys ** 2, axis=1, keepdims=True) ** 0.5 + 1e-6
+    can_gt_polys /= np.repeat(distance, axis=1, repeats=2)
+    idx_bottom = np.argmax(can_gt_polys[:, 1])
+    idx_top = np.argmin(can_gt_polys[:, 1])
+    idx_right = np.argmax(can_gt_polys[:, 0])
+    idx_left = np.argmin(can_gt_polys[:, 0])
+    return [idx_bottom, idx_right, idx_top, idx_left]
+
+def get_img_gt(img_gt_poly, idx, t=128):
+    align = len(idx)
+    pointsNum = img_gt_poly.shape[0]
+    r = []
+    k = np.arange(0, t / align, dtype=float) / (t / align)
+    for i in range(align):
+        begin = idx[i]
+        end = idx[(i + 1) % align]
+        if begin > end:
+            end += pointsNum
+        r.append((np.round(((end - begin) * k).astype(int)) + begin) % pointsNum)
+    r = np.concatenate(r, axis=0)
+    return img_gt_poly[r, :]
+
+def img_poly_to_can_poly(img_poly):
+    x_min, y_min = np.min(img_poly, axis=0)
+    can_poly = img_poly - np.array([x_min, y_min])
+    return can_poly
+
+def collect_training(poly, ct_01):
+    batch_size = ct_01.size(0)
+    poly = torch.cat([poly[i][ct_01[i]] for i in range(batch_size)], dim=0)
+    return poly
+
+def prepare_training(ret, batch, ro):  # output, batch, self.ro = 4.
+    ct_01 = batch['ct_01'].byte()
+    init = {}
+
+    init.update({'img_gt_polys': collect_training(batch['img_gt_polys'], ct_01)})
+    init.update({'img_init_polys': ret['poly_coarse'].detach() / ro})
+    can_init_polys = img_poly_to_can_poly(ret['poly_coarse'].detach() / ro)
+    init.update({'can_init_polys': can_init_polys})
+
+    ct_num = batch['meta']['ct_num']
+    init.update({'py_ind': torch.cat([torch.full([ct_num[i]], i) for i in range(ct_01.size(0))], dim=0)})
+    init.update({'py_ind': init['py_ind']})
+    init['py_ind'] = init['py_ind'].to(ct_01.device)
+
+    return init
+
+def img_poly_to_can_poly(img_poly):
+    if len(img_poly) == 0:
+        return torch.zeros_like(img_poly)
+    x_min = torch.min(img_poly[..., 0], dim=-1)[0]
+    y_min = torch.min(img_poly[..., 1], dim=-1)[0]
+    can_poly = img_poly.clone()
+    can_poly[..., 0] = can_poly[..., 0] - x_min[..., None]
+    can_poly[..., 1] = can_poly[..., 1] - y_min[..., None]
+    return can_poly
+
+def get_gcn_feature(cnn_feature, img_poly, ind, h, w):
+    img_poly = img_poly.clone()
+    img_poly[..., 0] = img_poly[..., 0] / (w / 2.) - 1
+    img_poly[..., 1] = img_poly[..., 1] / (h / 2.) - 1
+
+    batch_size = cnn_feature.size(0)
+    gcn_feature = torch.zeros([img_poly.size(0), cnn_feature.size(1), img_poly.size(1)]).to(img_poly.device)
+    for i in range(batch_size):
+        poly = img_poly[ind == i].unsqueeze(0)
+        feature = torch.nn.functional.grid_sample(cnn_feature[i:i+1], poly)[0].permute(1, 0, 2)
+        gcn_feature[ind == i] = feature
+    return gcn_feature
+
+def prepare_testing_init(polys, ro):
+    polys = polys / ro
+    can_init_polys = img_poly_to_can_poly(polys)
+    img_init_polys = polys
+    ind = torch.zeros((img_init_polys.size(0), ), dtype=torch.int32, device=img_init_polys.device)
+    init = {'img_init_polys': img_init_polys, 'can_init_polys': can_init_polys, 'py_ind': ind}
+    return init
+
+
 @HEADS.register_module()
 class E2ECHead(BaseDenseHead, BBoxTestMixin):
     """Objects as Points Head. CenterHead use center_point to indicate object's
@@ -91,6 +461,8 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
                  init_stride=10.,
                  coarse_stride=4.,
                  min_ct_score=0.05,
+                 evole_ietr_num=3,
+                 evolve_stride=1,
                  loss_center_heatmap=dict(type='GaussianFocalLoss', loss_weight=1.0),
                  loss_wh=dict(type='L1Loss', loss_weight=0.1),
                  loss_offset=dict(type='L1Loss', loss_weight=1.0),
@@ -104,6 +476,8 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
         self.init_stride = init_stride
         self.coarse_stride = coarse_stride
         self.min_ct_score = min_ct_score
+        self.evole_ietr_num = evole_ietr_num
+        self.evolve_stride = evolve_stride
         self.heatmap_head = self._build_head(in_channel, feat_channel,
                                              num_classes)
         self.wh_head = self._build_head(in_channel, feat_channel, 2 * self.points_per_poly)
@@ -113,6 +487,9 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
         self.loss_wh = build_loss(loss_wh)
         self.loss_offset = build_loss(loss_offset)
         self.refine = Refine(c_in=in_channel, num_point=points_per_poly, stride=coarse_stride)
+        self.d = Douglas()
+        self.gcn = Evolution(evole_ietr_num=self.evole_ietr_num, evolve_stride=self.evolve_stride,
+                             ro=self.down_sample)
 
         self.train_cfg = train_cfg
         self.test_cfg = test_cfg
@@ -150,9 +527,6 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
         # output.update({'poly_init': init_polys * self.down_sample})
         # output.update({'poly_coarse': coarse_polys * self.down_sample})
         return poly_init, poly_coarse
-
-    def gcn(self):
-        
 
     def _build_head(self, in_channel, feat_channel, out_channel):
         """Build head for each branch."""
@@ -205,7 +579,6 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
         wh_pred = self.wh_head(feat)
         offset_pred = self.offset_head(feat)
         cnn_feature = feat
-        # poly_init, poly_coarse = self.train_decode(center_heatmap_pred, wh_pred, offset_pred, feat)
 
         return center_heatmap_pred, wh_pred, offset_pred, cnn_feature
 
@@ -216,6 +589,7 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
              offset_preds,
              cnn_features,
              gt_bboxes,
+             gt_semantic_seg,
              gt_labels,
              img_metas,
              gt_bboxes_ignore=None):
@@ -243,6 +617,12 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
                 - loss_offset (Tensor): loss of offset heatmap.
         """
         assert len(center_heatmap_preds) == len(wh_preds) == len(offset_preds) == len(cnn_features) == 1
+
+        output = {}
+
+        output.update({'ct_hm': center_heatmap_preds})
+        output.update({'wh': wh_preds})
+
         center_heatmap_pred = center_heatmap_preds[0]
         wh_pred = wh_preds[0]
         offset_pred = offset_preds[0]
@@ -270,9 +650,14 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
         ct_01 = torch.zeros([batch_size, max_len], dtype=torch.bool)
         ct_img_idx = torch.zeros([batch_size, max_len], dtype=torch.int64)
         ct_ind = torch.zeros([batch_size, max_len], dtype=torch.int64)
-        img_gt_polys = torch.zeros([batch_size, max_len, num_points_per_poly, 2], dtype=torch.float)
-        can_gt_polys = torch.zeros([batch_size, max_len, num_points_per_poly, 2], dtype=torch.float)
-        keyPointsMask = torch.zeros([batch_size, max_len, num_points_per_poly], dtype=torch.float)
+
+        # img_gt_polys = torch.zeros([batch_size, max_len, num_points_per_poly, 2], dtype=torch.float)
+        # can_gt_polys = torch.zeros([batch_size, max_len, num_points_per_poly, 2], dtype=torch.float)
+        # keyPointsMask = torch.zeros([batch_size, max_len, num_points_per_poly], dtype=torch.float)
+
+        img_gt_polys = []
+        can_gt_polys = []
+        keyPointsMask = []
 
         for i in range(batch_size):
             ct_01[i, :ct_num[i]] = 1
@@ -283,14 +668,29 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
                 bbox = gt_bbox[j]  # bbox format [tl_x, tl_y, br_x, br_y]
                 int_ctx, int_cty = int(sum(bbox[0::2]) / 2), int(sum(bbox[1::2]) / 2)
                 ct_ind[i].append(int_cty * width + int_ctx)
+
+        for i, instance_poly in enumerate(gt_semantic_seg):
+            for j in range(len(instance_poly)):  # instance_ploy: 一张图片的所有poly
+                poly = instance_poly[j]
+                img_gt_poly = uniformsample(poly, len(poly) * self.points_per_poly)
+                idx = four_idx(img_gt_poly)
+                img_gt_poly = get_img_gt(img_gt_poly, idx)
+                can_gt_poly = img_poly_to_can_poly(img_gt_poly)
+                key_mask = self.d.sample(img_gt_poly)
+                keyPointsMask.append(key_mask)
+                img_gt_polys.append(img_gt_poly)
+                can_gt_polys.append(can_gt_poly)
             
 
         data_input = {'ct_num': ct_num, 'ct_01': ct_01, 'ct_img_idx': ct_img_idx, 'ct_ind': ct_ind, 'img_gt_polys': img_gt_polys, 'can_gt_polys': can_gt_polys,
                       'keypoints_mask': keyPointsMask}
         
         poly_init, poly_coarse = self.train_decode(center_heatmap_pred, wh_pred, offset_pred, cnn_feature, data_input)
+
+        output.update({'poly_init': poly_init})
+        output.update({'poly_coarse': poly_coarse})
         
-        output = self.gcn(poly_coarse, cnn_feature, data_input) #output已经更新了poly_init和poly_coarse 图网络
+        output = self.gcn(output, cnn_feature, data_input) # output已经更新了poly_init和poly_coarse 图网络
 
 
 
@@ -319,6 +719,47 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
             loss_center_heatmap=loss_center_heatmap,
             loss_wh=loss_wh,
             loss_offset=loss_offset)
+    
+    def forward_train(self,
+                      x,
+                      img_metas,
+                      gt_bboxes,
+                      gt_semantic_seg,
+                      gt_labels=None,
+                      gt_bboxes_ignore=None,
+                      proposal_cfg=None,
+                      **kwargs):
+        """
+        Args:
+            x (list[Tensor]): Features from FPN.
+            img_metas (list[dict]): Meta information of each image, e.g.,
+                image size, scaling factor, etc.
+            gt_bboxes (Tensor): Ground truth bboxes of the image,
+                shape (num_gts, 4).
+            gt_labels (Tensor): Ground truth labels of each box,
+                shape (num_gts,).
+            gt_bboxes_ignore (Tensor): Ground truth bboxes to be
+                ignored, shape (num_ignored_gts, 4).
+            proposal_cfg (mmcv.Config): Test / postprocessing configuration,
+                if None, test_cfg would be used
+
+        Returns:
+            tuple:
+                losses: (dict[str, Tensor]): A dictionary of loss components.
+                proposal_list (list[Tensor]): Proposals of each image.
+        """
+        outs = self(x)
+        if gt_labels is None:
+            loss_inputs = outs + (gt_bboxes, gt_semantic_seg, img_metas)
+        else:
+            loss_inputs = outs + (gt_bboxes, gt_semantic_seg, gt_labels, img_metas)
+        losses = self.loss(*loss_inputs, gt_bboxes_ignore=gt_bboxes_ignore)
+        if proposal_cfg is None:
+            return losses
+        else:
+            proposal_list = self.get_bboxes(
+                *outs, img_metas=img_metas, cfg=proposal_cfg)
+            return losses, proposal_list
 
     def get_targets(self, gt_bboxes, gt_labels, feat_shape, img_shape):
         """Compute regression and classification targets in multiple images.
