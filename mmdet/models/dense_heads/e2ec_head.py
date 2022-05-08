@@ -466,6 +466,10 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
                  loss_center_heatmap=dict(type='GaussianFocalLoss', loss_weight=1.0),
                  loss_wh=dict(type='L1Loss', loss_weight=0.1),
                  loss_offset=dict(type='L1Loss', loss_weight=1.0),
+                 loss_init=dict(type='SmoothL1Loss', loss_weight=0.1),
+                 loss_coarse=dict(type='SmoothL1Loss', loss_weight=0.1),
+                 loss_iter1=dict(type='SmoothL1Loss', loss_weight=1.0),
+                 loss_iter2=dict(type='DML', loss_weight=1.0),
                  train_cfg=None,
                  test_cfg=None,
                  init_cfg=None):
@@ -486,6 +490,11 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
         self.loss_center_heatmap = build_loss(loss_center_heatmap)
         self.loss_wh = build_loss(loss_wh)
         self.loss_offset = build_loss(loss_offset)
+        self.loss_init = build_loss(loss_init)
+        self.loss_coarse = build_loss(loss_coarse)
+        self.loss_iter1 = build_loss(loss_iter1)
+        self.loss_iter2 = build_loss(loss_iter2)
+
         self.refine = Refine(c_in=in_channel, num_point=points_per_poly, stride=coarse_stride)
         self.d = Douglas()
         self.gcn = Evolution(evole_ietr_num=self.evole_ietr_num, evolve_stride=self.evolve_stride,
@@ -690,7 +699,7 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
         output.update({'poly_init': poly_init})
         output.update({'poly_coarse': poly_coarse})
         
-        output = self.gcn(output, cnn_feature, data_input) # output已经更新了poly_init和poly_coarse 图网络
+        output = self.gcn(output, cnn_feature, data_input) 
 
 
 
@@ -715,10 +724,29 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
             offset_target,
             wh_offset_target_weight,
             avg_factor=avg_factor * 2)
+        loss_init = self.loss_init(
+            output['poly_init'],
+            output['img_gt_polys'],
+            reduction_override='mean')
+        loss_coarse = self.loss_coarse(
+            output['poly_coarse'],
+            output['img_gt_polys'],
+            reduction_override='mean')
+        loss_iter1 = self.loss_iter1(
+            output['py_pred'],
+            output['img_gt_polys'],
+            reduction_override='mean'
+        )
+        loss_iter2 = self.loss_iter2()
+
         return dict(
             loss_center_heatmap=loss_center_heatmap,
             loss_wh=loss_wh,
-            loss_offset=loss_offset)
+            loss_offset=loss_offset
+            loss_init=loss_init,
+            loss_coarse=loss_coarse,
+            loss_iter1=loss_iter1
+            )
     
     def forward_train(self,
                       x,
