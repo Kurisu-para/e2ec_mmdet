@@ -3,6 +3,9 @@ import torch
 import torch.nn as nn
 import math
 import numpy as np
+# import cv2
+# import random
+# from shapely.geometry import Polygon
 from mmcv.cnn import bias_init_with_prob, normal_init
 from mmcv.ops import batched_nms
 from mmcv.runner import force_fp32
@@ -206,12 +209,33 @@ class Evolution(nn.Module):
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
 
-    def prepare_training(self, output, batch):
-        init = prepare_training(output, batch, self.ro)
-        return init
+    def prepare_training(self, output, batch):  # output, batch, self.ro = 4.
+        ro = self.ro
+        ret = output
+        ct_01 = batch['ct_01'].byte()
+        init = {}
 
+        init.update({'img_gt_polys': collect_training(batch['img_gt_polys'], ct_01)})
+        init.update({'img_init_polys': ret['poly_coarse'].detach() / ro})
+        can_init_polys = img_poly_to_can_poly(ret['poly_coarse'].detach() / ro)
+        init.update({'can_init_polys': can_init_polys})
+
+        ct_num = batch['meta']['ct_num']
+        init.update({'py_ind': torch.cat([torch.full([ct_num[i]], i) for i in range(ct_01.size(0))], dim=0)})
+        init.update({'py_ind': init['py_ind']})
+        init['py_ind'] = init['py_ind'].to(ct_01.device)
+
+        return init
+    
     def prepare_testing_init(self, output):
-        init = prepare_testing_init(output['poly_coarse'], self.ro)
+        ro = self.ro
+        polys = output['poly_coarse']
+        polys = polys / ro
+        can_init_polys = img_poly_to_can_poly(polys)
+        img_init_polys = polys
+        ind = torch.zeros((img_init_polys.size(0), ), dtype=torch.int32, device=img_init_polys.device)
+        init = {'img_init_polys': img_init_polys, 'can_init_polys': can_init_polys, 'py_ind': ind}
+        
         return init
 
     def prepare_testing_evolve(self, output, h, w):
@@ -268,16 +292,20 @@ class Evolution(nn.Module):
             ret.update({'py': pys})
         return output
 
-    def forward(self, output, cnn_feature, batch=None, test_stage='final-dml'):
-        if batch is not None and 'test' not in batch['meta']:
-            self.foward_train(output, batch, cnn_feature)
-        else:
-            ignore = [False] * (self.iter + 1)
-            if test_stage == 'coarse' or test_stage == 'init':
-                ignore = [True for _ in ignore]
-            if test_stage == 'final':
-                ignore[-1] = True
-            self.foward_test(output, cnn_feature, ignore=ignore)
+    # def forward(self, output, cnn_feature, batch=None, test_stage='final-dml'):
+    #     if batch is not None and 'test' not in batch['meta']:
+    #         self.foward_train(output, batch, cnn_feature)
+    #     else:
+    #         ignore = [False] * (self.iter + 1)
+    #         if test_stage == 'coarse' or test_stage == 'init':
+    #             ignore = [True for _ in ignore]
+    #         if test_stage == 'final':
+    #             ignore[-1] = True
+    #         self.foward_test(output, cnn_feature, ignore=ignore)
+    #     return output
+
+    def forward(self, output, cnn_feature, batch=None):
+        self.foward_train(output, batch, cnn_feature)
         return output
 
 def uniformsample(pgtnp_px2, newpnum):
@@ -383,22 +411,6 @@ def collect_training(poly, ct_01):
     poly = torch.cat([poly[i][ct_01[i]] for i in range(batch_size)], dim=0)
     return poly
 
-def prepare_training(ret, batch, ro):  # output, batch, self.ro = 4.
-    ct_01 = batch['ct_01'].byte()
-    init = {}
-
-    init.update({'img_gt_polys': collect_training(batch['img_gt_polys'], ct_01)})
-    init.update({'img_init_polys': ret['poly_coarse'].detach() / ro})
-    can_init_polys = img_poly_to_can_poly(ret['poly_coarse'].detach() / ro)
-    init.update({'can_init_polys': can_init_polys})
-
-    ct_num = batch['meta']['ct_num']
-    init.update({'py_ind': torch.cat([torch.full([ct_num[i]], i) for i in range(ct_01.size(0))], dim=0)})
-    init.update({'py_ind': init['py_ind']})
-    init['py_ind'] = init['py_ind'].to(ct_01.device)
-
-    return init
-
 def img_poly_to_can_poly(img_poly):
     if len(img_poly) == 0:
         return torch.zeros_like(img_poly)
@@ -421,15 +433,6 @@ def get_gcn_feature(cnn_feature, img_poly, ind, h, w):
         feature = torch.nn.functional.grid_sample(cnn_feature[i:i+1], poly)[0].permute(1, 0, 2)
         gcn_feature[ind == i] = feature
     return gcn_feature
-
-def prepare_testing_init(polys, ro):
-    polys = polys / ro
-    can_init_polys = img_poly_to_can_poly(polys)
-    img_init_polys = polys
-    ind = torch.zeros((img_init_polys.size(0), ), dtype=torch.int32, device=img_init_polys.device)
-    init = {'img_init_polys': img_init_polys, 'can_init_polys': can_init_polys, 'py_ind': ind}
-    return init
-
 
 @HEADS.register_module()
 class E2ECHead(BaseDenseHead, BBoxTestMixin):
@@ -469,7 +472,7 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
                  loss_init=dict(type='SmoothL1Loss', loss_weight=0.1),
                  loss_coarse=dict(type='SmoothL1Loss', loss_weight=0.1),
                  loss_iter1=dict(type='SmoothL1Loss', loss_weight=1.0),
-                 loss_iter2=dict(type='DML', loss_weight=1.0),
+                 loss_iter2=dict(type='DMLoss', loss_weight=1.0),
                  train_cfg=None,
                  test_cfg=None,
                  init_cfg=None):
@@ -701,15 +704,6 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
         
         output = self.gcn(output, cnn_feature, data_input) 
 
-
-
-
-
-
-
-
-
-
         # Since the channel of wh_target and offset_target is 2, the avg_factor
         # of loss_center_heatmap is always 1/2 of loss_wh and loss_offset.
         loss_center_heatmap = self.loss_center_heatmap(
@@ -735,17 +729,22 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
         loss_iter1 = self.loss_iter1(
             output['py_pred'],
             output['img_gt_polys'],
-            reduction_override='mean'
-        )
-        loss_iter2 = self.loss_iter2()
+            reduction_override='mean')
+        loss_iter2 = self.loss_iter2(
+            output['py_pred'][-2],
+            output['py_pred'][-1],
+            output['img_gt_polys'],
+            keyPointsMask,
+            reduction_override='mean')
 
         return dict(
             loss_center_heatmap=loss_center_heatmap,
             loss_wh=loss_wh,
-            loss_offset=loss_offset
+            loss_offset=loss_offset,
             loss_init=loss_init,
             loss_coarse=loss_coarse,
-            loss_iter1=loss_iter1
+            loss_iter1=loss_iter1,
+            loss_iter2=loss_iter2
             )
     
     def forward_train(self,

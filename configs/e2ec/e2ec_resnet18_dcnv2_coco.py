@@ -30,7 +30,7 @@ model = dict(
         loss_init=dict(type='SmoothL1Loss', loss_weight=0.1),
         loss_coarse=dict(type='SmoothL1Loss', loss_weight=0.1),
         loss_iter1=dict(type='SmoothL1Loss', loss_weight=1.0),
-        loss_iter2=dict(type='DML', loss_weight=1.0))
+        loss_iter2=dict(type='DMLoss', loss_weight=1.0))
 )
 
 # We fixed the incorrect img_norm_cfg problem in the source code.
