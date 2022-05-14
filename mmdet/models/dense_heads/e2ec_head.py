@@ -628,17 +628,17 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
                 - loss_wh (Tensor): loss of hw heatmap
                 - loss_offset (Tensor): loss of offset heatmap.
         """
-        assert len(center_heatmap_preds) == len(wh_preds) == len(offset_preds) == len(cnn_features) == 1
+        assert len(center_heatmap_preds) == len(wh_preds) == len(offset_preds) == len(cnn_features)
 
         output = {}
 
         output.update({'ct_hm': center_heatmap_preds})
         output.update({'wh': wh_preds})
 
-        center_heatmap_pred = center_heatmap_preds[0]
-        wh_pred = wh_preds[0]
-        offset_pred = offset_preds[0]
-        cnn_feature = cnn_features[0]
+        center_heatmap_pred = torch.stack(center_heatmap_preds, 0)
+        wh_pred = torch.stack(wh_preds, 0)
+        offset_pred = torch.stack(offset_preds, 0)
+        cnn_feature = torch.stack(cnn_features, 0)
 
         batch_size, _, height, width = center_heatmap_pred.size() 
 

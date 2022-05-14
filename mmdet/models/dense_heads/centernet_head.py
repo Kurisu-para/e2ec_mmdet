@@ -6,7 +6,7 @@ from mmcv.ops import batched_nms
 from mmcv.runner import force_fp32
 
 from mmdet.core import multi_apply
-from mmdet.models import HEADS, build_loss #去查一查有哪些loss
+from mmdet.models import HEADS, build_loss
 from mmdet.models.utils import gaussian_radius, gen_gaussian_target
 from ..utils.gaussian_target import (get_local_maximum, get_topk_from_heatmap,
                                      transpose_and_gather_feat)
@@ -18,7 +18,6 @@ from .dense_test_mixins import BBoxTestMixin
 class CenterNetHead(BaseDenseHead, BBoxTestMixin):
     """Objects as Points Head. CenterHead use center_point to indicate object's
     position. Paper link <https://arxiv.org/abs/1904.07850>
-
     Args:
         in_channel (int): Number of channel in the input feature map.
         feat_channel (int): Number of channel in the intermediate feature map.
@@ -80,11 +79,9 @@ class CenterNetHead(BaseDenseHead, BBoxTestMixin):
 
     def forward(self, feats):
         """Forward features. Notice CenterNet head does not use FPN.
-
         Args:
             feats (tuple[Tensor]): Features from the upstream network, each is
                 a 4D-tensor.
-
         Returns:
             center_heatmap_preds (List[Tensor]): center predict heatmaps for
                 all levels, the channels number is num_classes.
@@ -97,15 +94,13 @@ class CenterNetHead(BaseDenseHead, BBoxTestMixin):
 
     def forward_single(self, feat):
         """Forward feature of a single level.
-
         Args:
             feat (Tensor): Feature of a single level.
-
         Returns:
             center_heatmap_pred (Tensor): center predict heatmaps, the
-               channels number is num_classes. [h/4,w/4,cls_nums]
-            wh_pred (Tensor): wh predicts, the channels number is 2. [h/4,w/4,2]
-            offset_pred (Tensor): offset predicts, the channels number is 2. [h/4,w/4,2]
+               channels number is num_classes.
+            wh_pred (Tensor): wh predicts, the channels number is 2.
+            offset_pred (Tensor): offset predicts, the channels number is 2.
         """
         center_heatmap_pred = self.heatmap_head(feat).sigmoid()
         wh_pred = self.wh_head(feat)
@@ -122,7 +117,6 @@ class CenterNetHead(BaseDenseHead, BBoxTestMixin):
              img_metas,
              gt_bboxes_ignore=None):
         """Compute losses of the head.
-
         Args:
             center_heatmap_preds (list[Tensor]): center predict heatmaps for
                all levels with shape (B, num_classes, H, W).
@@ -137,7 +131,6 @@ class CenterNetHead(BaseDenseHead, BBoxTestMixin):
                 image size, scaling factor, etc.
             gt_bboxes_ignore (None | list[Tensor]): specify which bounding
                 boxes can be ignored when computing the loss. Default: None
-
         Returns:
             dict[str, Tensor]: which has components below:
                 - loss_center_heatmap (Tensor): loss of center heatmap.
@@ -145,10 +138,10 @@ class CenterNetHead(BaseDenseHead, BBoxTestMixin):
                 - loss_offset (Tensor): loss of offset heatmap.
         """
         assert len(center_heatmap_preds) == len(wh_preds) == len(
-            offset_preds) == 1
-        center_heatmap_pred = center_heatmap_preds[0]
-        wh_pred = wh_preds[0]
-        offset_pred = offset_preds[0]
+            offset_preds)
+        center_heatmap_pred = torch.stack(center_heatmap_preds, 0)
+        wh_pred = torch.stack(wh_preds, 0)
+        offset_pred = torch.stack(offset_preds, 0)
 
         target_result, avg_factor = self.get_targets(gt_bboxes, gt_labels,
                                                      center_heatmap_pred.shape,
@@ -180,14 +173,12 @@ class CenterNetHead(BaseDenseHead, BBoxTestMixin):
 
     def get_targets(self, gt_bboxes, gt_labels, feat_shape, img_shape):
         """Compute regression and classification targets in multiple images.
-
         Args:
             gt_bboxes (list[Tensor]): Ground truth bboxes for each image with
                 shape (num_gts, 4) in [tl_x, tl_y, br_x, br_y] format.
             gt_labels (list[Tensor]): class indices corresponding to each box.
             feat_shape (list[int]): feature map shape with value [B, _, H, W]
             img_shape (list[int]): image shape in [h, w] format.
-
         Returns:
             tuple[dict,float]: The float value is mean avg_factor, the dict has
                components below:
@@ -257,7 +248,6 @@ class CenterNetHead(BaseDenseHead, BBoxTestMixin):
                    rescale=True,
                    with_nms=False):
         """Transform network output for a batch into bbox predictions.
-
         Args:
             center_heatmap_preds (list[Tensor]): Center predict heatmaps for
                 all levels with shape (B, num_classes, H, W).
@@ -271,7 +261,6 @@ class CenterNetHead(BaseDenseHead, BBoxTestMixin):
                 Default: True.
             with_nms (bool): If True, do nms before return boxes.
                 Default: False.
-
         Returns:
             list[tuple[Tensor, Tensor]]: Each item in result_list is 2-tuple.
                 The first item is an (n, 5) tensor, where 5 represent
@@ -302,7 +291,6 @@ class CenterNetHead(BaseDenseHead, BBoxTestMixin):
                            rescale=False,
                            with_nms=True):
         """Transform outputs of a single image into bbox results.
-
         Args:
             center_heatmap_pred (Tensor): Center heatmap for current level with
                 shape (1, num_classes, H, W).
@@ -316,7 +304,6 @@ class CenterNetHead(BaseDenseHead, BBoxTestMixin):
                 Default: False.
             with_nms (bool): If True, do nms before return boxes.
                 Default: True.
-
         Returns:
             tuple[Tensor, Tensor]: The first item is an (n, 5) tensor, where
                 5 represent (tl_x, tl_y, br_x, br_y, score) and the score
@@ -356,7 +343,6 @@ class CenterNetHead(BaseDenseHead, BBoxTestMixin):
                        k=100,
                        kernel=3):
         """Transform outputs into detections raw bbox prediction.
-
         Args:
             center_heatmap_pred (Tensor): center predict heatmap,
                shape (B, num_classes, H, W).
@@ -366,11 +352,9 @@ class CenterNetHead(BaseDenseHead, BBoxTestMixin):
             k (int): Get top k center keypoints from heatmap. Default 100.
             kernel (int): Max pooling kernel for extract local maximum pixels.
                Default 3.
-
         Returns:
             tuple[torch.Tensor]: Decoded output of CenterNetHead, containing
                the following Tensors:
-
               - batch_bboxes (Tensor): Coords of each box with shape (B, k, 5)
               - batch_topk_labels (Tensor): Categories of each box with \
                   shape (B, k)

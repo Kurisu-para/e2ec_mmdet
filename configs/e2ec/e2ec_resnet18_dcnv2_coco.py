@@ -58,6 +58,7 @@ train_pipeline = [
     dict(type='RandomFlip', flip_ratio=0.5),
     dict(type='Normalize', **img_norm_cfg),
     dict(type='DefaultFormatBundle'),
+    # dict(type='Collect', keys=['img', 'gt_bboxes', 'gt_labels'])
     dict(type='Collect', keys=['img', 'gt_bboxes', 'gt_labels', 'gt_semantic_seg'])
 ]
 
@@ -117,6 +118,7 @@ data = dict(
             ann_file=data_root + 'annotations/instances_val2017.json',
             img_prefix=data_root + 'val2017/',
             pipeline=test_pipeline))
+
 
 # optimizer
 # Based on the default settings of modern detectors, the SGD effect is better
