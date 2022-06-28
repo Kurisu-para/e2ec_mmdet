@@ -4,6 +4,7 @@ from collections.abc import Sequence
 import mmcv
 import numpy as np
 import torch
+from torch.utils.data.dataloader import default_collate
 from mmcv.parallel import DataContainer as DC
 
 from ..builder import PIPELINES
@@ -243,6 +244,7 @@ class DefaultFormatBundle:
                 to_tensor(results['gt_semantic_seg'][None, ...]),
                 padding_value=self.pad_val['seg'],
                 stack=True)
+
         return results
 
     def _add_default_meta_keys(self, results):

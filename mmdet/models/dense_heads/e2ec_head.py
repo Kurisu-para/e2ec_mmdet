@@ -1,8 +1,10 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import torch
 import torch.nn as nn
+from torch.utils.data.dataloader import default_collate
 import math
 import numpy as np
+from args import coco as cfg
 # import cv2
 # import random
 # from shapely.geometry import Polygon
@@ -18,53 +20,6 @@ from ..utils.gaussian_target import (get_local_maximum, get_topk_from_heatmap,
 from .base_dense_head import BaseDenseHead
 from .dense_test_mixins import BBoxTestMixin
 
-class Refine(nn.Module):  # cnn_feature, ct, init_polys, ct_img_idx.clone()
-        def __init__(self, c_in=64, num_point=128, stride=4.):
-            super(Refine, self).__init__()
-            self.num_point = num_point
-            self.stride = stride
-            self.trans_feature = torch.nn.Sequential(torch.nn.Conv2d(c_in, 256, kernel_size=3,
-                                                                    padding=1, bias=True),
-                                                    torch.nn.ReLU(inplace=True),
-                                                    torch.nn.Conv2d(256, 64, kernel_size=1,
-                                                                    stride=1, padding=0, bias=True))
-            self.trans_poly = torch.nn.Linear(in_features=((num_point + 1) * 64),
-                                            out_features=num_point * 4, bias=False)
-            self.trans_fuse = torch.nn.Linear(in_features=num_point * 4,
-                                            out_features=num_point * 2, bias=True)
-
-        def global_deform(self, points_features, init_polys):
-            poly_num = init_polys.size(0)
-            points_features = self.trans_poly(points_features)
-            offsets = self.trans_fuse(points_features).view(poly_num, self.num_point, 2)
-            coarse_polys = offsets * self.stride + init_polys.detach()
-            return coarse_polys
-        
-        def get_gcn_feature(cnn_feature, img_poly, ind, h, w): #feature shape [16, 64, 128, 128], points shape [154,128+1,2], ct_img_idx, h, w
-            img_poly = img_poly.clone()
-            img_poly[..., 0] = img_poly[..., 0] / (w / 2.) - 1
-            img_poly[..., 1] = img_poly[..., 1] / (h / 2.) - 1 
-            batch_size = cnn_feature.size(0)
-            gcn_feature = torch.zeros([img_poly.size(0), cnn_feature.size(1), img_poly.size(1)]).to(img_poly.device)
-            for i in range(batch_size):
-                poly = img_poly[ind == i].unsqueeze(0)
-                feature = torch.nn.functional.grid_sample(cnn_feature[i:i+1], poly)[0].permute(1, 0, 2)
-                gcn_feature[ind == i] = feature
-            return gcn_feature
-
-        def forward(self, feature, ct_polys, init_polys, ct_img_idx, ignore=False):
-            if ignore or len(init_polys) == 0:
-                return init_polys
-            h, w = feature.size(2), feature.size(3)
-            poly_num = ct_polys.size(0)
-        
-            feature = self.trans_feature(feature)
-
-            ct_polys = ct_polys.unsqueeze(1).expand(init_polys.size(0), 1, init_polys.size(2))
-            points = torch.cat([ct_polys, init_polys], dim=1)
-            feature_points = self.get_gcn_feature(feature, points, ct_img_idx, h, w).view(poly_num, -1)
-            coarse_polys = self.global_deform(feature_points, init_polys)
-            return coarse_polys
 
 class Douglas:
     D = 3
@@ -97,216 +52,6 @@ class Douglas:
             mask[max_idx] = 1
             self.compress(idx1, max_idx, poly, mask)
             self.compress(max_idx, idx2, poly, mask)
-
-class CircConv(nn.Module):
-    def __init__(self, state_dim, out_state_dim=None, n_adj=4):
-        super(CircConv, self).__init__()
-
-        self.n_adj = n_adj
-        out_state_dim = state_dim if out_state_dim is None else out_state_dim
-        self.fc = nn.Conv1d(state_dim, out_state_dim, kernel_size=self.n_adj*2+1)
-
-    def forward(self, input):
-        if self.n_adj != 0:
-            input = torch.cat([input[..., -self.n_adj:], input, input[..., :self.n_adj]], dim=2)
-        return self.fc(input)
-
-class DilatedCircConv(nn.Module):
-    def __init__(self, state_dim, out_state_dim=None, n_adj=4, dilation=1):   # state_dim=128, feature_dim=64+2, conv_type='dgrid'
-        super(DilatedCircConv, self).__init__()
-
-        self.n_adj = n_adj
-        self.dilation = dilation
-        out_state_dim = state_dim if out_state_dim is None else out_state_dim
-        self.fc = nn.Conv1d(state_dim, out_state_dim, kernel_size=self.n_adj*2+1, dilation=self.dilation)
-
-    def forward(self, input):
-        if self.n_adj != 0:
-            input = torch.cat([input[..., -self.n_adj*self.dilation:], input, input[..., :self.n_adj*self.dilation]], dim=2)
-        return self.fc(input)
-
-_conv_factory = {
-    'grid': CircConv,
-    'dgrid': DilatedCircConv
-}
-
-class BasicBlock(nn.Module):
-    def __init__(self, state_dim, out_state_dim, conv_type, n_adj=4, dilation=1):
-        super(BasicBlock, self).__init__()
-        if conv_type == 'grid':
-            self.conv = _conv_factory[conv_type](state_dim, out_state_dim, n_adj)
-        else:
-            self.conv = _conv_factory[conv_type](state_dim, out_state_dim, n_adj, dilation)
-        self.relu = nn.ReLU(inplace=True)
-        self.norm = nn.BatchNorm1d(out_state_dim)
-
-    def forward(self, x):
-        x = self.conv(x)
-        x = self.relu(x)
-        x = self.norm(x)
-        return x
-
-class Snake(nn.Module):
-    def __init__(self, state_dim, feature_dim, conv_type='dgrid'):
-        super(Snake, self).__init__()
-        self.head = BasicBlock(feature_dim, state_dim, conv_type)
-        self.res_layer_num = 7
-        dilation = [1, 1, 1, 2, 2, 4, 4]
-        n_adj = 4
-        for i in range(self.res_layer_num):
-            if dilation[i] == 0:
-                conv_type = 'grid'
-            else:
-                conv_type = 'dgrid'
-            conv = BasicBlock(state_dim, state_dim, conv_type, n_adj=n_adj, dilation=dilation[i])
-            self.__setattr__('res'+str(i), conv)
-
-        fusion_state_dim = 256
-        
-        self.fusion = nn.Conv1d(state_dim * (self.res_layer_num + 1), fusion_state_dim, 1)
-        
-        self.prediction = nn.Sequential(
-            nn.Conv1d(state_dim * (self.res_layer_num + 1) + fusion_state_dim, 256, 1),
-            nn.ReLU(inplace=True),
-            nn.Conv1d(256, 64, 1),
-            nn.ReLU(inplace=True),
-            nn.Conv1d(64, 2, 1)
-        )
-
-    def forward(self, x):
-        states = []
-        x = self.head(x)
-        states.append(x)
-        for i in range(self.res_layer_num):
-            x = self.__getattr__('res'+str(i))(x) + x
-            states.append(x)
-
-        state = torch.cat(states, dim=1)
-        
-        global_state = torch.max(self.fusion(state), dim=2, keepdim=True)[0]
-        global_state = global_state.expand(global_state.size(0), global_state.size(1), state.size(2))
-        state = torch.cat([global_state, state], dim=1)
-        
-        x = self.prediction(state)
-
-        return x
-
-class Evolution(nn.Module):
-    def __init__(self, evole_ietr_num=3, evolve_stride=1., ro=4.):
-        super(Evolution, self).__init__()
-        assert evole_ietr_num >= 1
-        self.evolve_stride = evolve_stride
-        self.ro = ro
-        self.evolve_gcn = Snake(state_dim=128, feature_dim=64+2, conv_type='dgrid')
-        self.iter = evole_ietr_num - 1 # 2
-        for i in range(self.iter):
-            evolve_gcn = Snake(state_dim=128, feature_dim=64+2, conv_type='dgrid')
-            self.__setattr__('evolve_gcn'+str(i), evolve_gcn)
-
-        for m in self.modules():
-            if isinstance(m, nn.Conv1d) or isinstance(m, nn.Conv2d):
-                m.weight.data.normal_(0.0, 0.01)
-                if m.bias is not None:
-                    nn.init.constant_(m.bias, 0)
-
-    def prepare_training(self, output, batch):  # output, batch, self.ro = 4.
-        ro = self.ro
-        ret = output
-        ct_01 = batch['ct_01'].byte()
-        init = {}
-
-        init.update({'img_gt_polys': collect_training(batch['img_gt_polys'], ct_01)})
-        init.update({'img_init_polys': ret['poly_coarse'].detach() / ro})
-        can_init_polys = img_poly_to_can_poly(ret['poly_coarse'].detach() / ro)
-        init.update({'can_init_polys': can_init_polys})
-
-        ct_num = batch['meta']['ct_num']
-        init.update({'py_ind': torch.cat([torch.full([ct_num[i]], i) for i in range(ct_01.size(0))], dim=0)})
-        init.update({'py_ind': init['py_ind']})
-        init['py_ind'] = init['py_ind'].to(ct_01.device)
-
-        return init
-    
-    def prepare_testing_init(self, output):
-        ro = self.ro
-        polys = output['poly_coarse']
-        polys = polys / ro
-        can_init_polys = img_poly_to_can_poly(polys)
-        img_init_polys = polys
-        ind = torch.zeros((img_init_polys.size(0), ), dtype=torch.int32, device=img_init_polys.device)
-        init = {'img_init_polys': img_init_polys, 'can_init_polys': can_init_polys, 'py_ind': ind}
-        
-        return init
-
-    def prepare_testing_evolve(self, output, h, w):
-        img_init_polys = output['img_init_polys']
-        img_init_polys[..., 0] = torch.clamp(img_init_polys[..., 0], min=0, max=w-1)
-        img_init_polys[..., 1] = torch.clamp(img_init_polys[..., 1], min=0, max=h-1)
-        output.update({'img_init_polys': img_init_polys})
-        return img_init_polys
-    
-    def evolve_poly(self, snake, cnn_feature, i_it_poly, c_it_poly, ind, stride=1., ignore=False): #evolve_gcn, cnn_feature, py_pred, c_py_pred, init['py_ind'], stride=self.evolve_stride
-        if ignore:
-            return i_it_poly * self.ro
-        if len(i_it_poly) == 0:
-            return torch.zeros_like(i_it_poly)
-        h, w = cnn_feature.size(2), cnn_feature.size(3)
-        init_feature = get_gcn_feature(cnn_feature, i_it_poly, ind, h, w)
-        c_it_poly = c_it_poly * self.ro
-        init_input = torch.cat([init_feature, c_it_poly.permute(0, 2, 1)], dim=1)
-        offset = snake(init_input).permute(0, 2, 1)
-        i_poly = i_it_poly * self.ro + offset * stride
-        return i_poly
-
-    def foward_train(self, output, batch, cnn_feature):
-        ret = output
-        init = self.prepare_training(output, batch)
-        py_pred = self.evolve_poly(self.evolve_gcn, cnn_feature, init['img_init_polys'],
-                                   init['can_init_polys'], init['py_ind'], stride=self.evolve_stride)
-        py_preds = [py_pred]
-        for i in range(self.iter): #2
-            py_pred = py_pred / self.ro
-            c_py_pred = img_poly_to_can_poly(py_pred)
-            evolve_gcn = self.__getattr__('evolve_gcn' + str(i))
-            py_pred = self.evolve_poly(evolve_gcn, cnn_feature, py_pred, c_py_pred,
-                                       init['py_ind'], stride=self.evolve_stride)
-            py_preds.append(py_pred)
-        ret.update({'py_pred': py_preds, 'img_gt_polys': init['img_gt_polys'] * self.ro})
-        return output
-
-    def foward_test(self, output, cnn_feature, ignore):
-        ret = output
-        with torch.no_grad():
-            init = self.prepare_testing_init(output)
-            img_init_polys = self.prepare_testing_evolve(init, cnn_feature.size(2), cnn_feature.size(3))
-            py = self.evolve_poly(self.evolve_gcn, cnn_feature, img_init_polys, init['can_init_polys'], init['py_ind'],
-                                  ignore=ignore[0], stride=self.evolve_stride)
-            pys = [py, ]
-            for i in range(self.iter):
-                py = py / self.ro
-                c_py = img_poly_to_can_poly(py)
-                evolve_gcn = self.__getattr__('evolve_gcn' + str(i))
-                py = self.evolve_poly(evolve_gcn, cnn_feature, py, c_py, init['py_ind'],
-                                      ignore=ignore[i + 1], stride=self.evolve_stride)
-                pys.append(py)
-            ret.update({'py': pys})
-        return output
-
-    # def forward(self, output, cnn_feature, batch=None, test_stage='final-dml'):
-    #     if batch is not None and 'test' not in batch['meta']:
-    #         self.foward_train(output, batch, cnn_feature)
-    #     else:
-    #         ignore = [False] * (self.iter + 1)
-    #         if test_stage == 'coarse' or test_stage == 'init':
-    #             ignore = [True for _ in ignore]
-    #         if test_stage == 'final':
-    #             ignore[-1] = True
-    #         self.foward_test(output, cnn_feature, ignore=ignore)
-    #     return output
-
-    def forward(self, output, cnn_feature, batch=None):
-        self.foward_train(output, batch, cnn_feature)
-        return output
 
 def uniformsample(pgtnp_px2, newpnum):
     pnum, cnum = pgtnp_px2.shape
@@ -401,15 +146,121 @@ def get_img_gt(img_gt_poly, idx, t=128):
     r = np.concatenate(r, axis=0)
     return img_gt_poly[r, :]
 
-def img_poly_to_can_poly(img_poly):
-    x_min, y_min = np.min(img_poly, axis=0)
-    can_poly = img_poly - np.array([x_min, y_min])
-    return can_poly
+#---------------------------------------------------------------------------------------------
+
+class CircConv(nn.Module):
+    def __init__(self, state_dim, out_state_dim=None, n_adj=4):
+        super(CircConv, self).__init__()
+
+        self.n_adj = n_adj
+        out_state_dim = state_dim if out_state_dim is None else out_state_dim
+        self.fc = nn.Conv1d(state_dim, out_state_dim, kernel_size=self.n_adj*2+1)
+
+    def forward(self, input):
+        if self.n_adj != 0:
+            input = torch.cat([input[..., -self.n_adj:], input, input[..., :self.n_adj]], dim=2)
+        return self.fc(input)
+
+class DilatedCircConv(nn.Module):
+    def __init__(self, state_dim, out_state_dim=None, n_adj=4, dilation=1):   # state_dim=128, feature_dim=64+2, conv_type='dgrid'
+        super(DilatedCircConv, self).__init__()
+
+        self.n_adj = n_adj
+        self.dilation = dilation
+        out_state_dim = state_dim if out_state_dim is None else out_state_dim
+        self.fc = nn.Conv1d(state_dim, out_state_dim, kernel_size=self.n_adj*2+1, dilation=self.dilation)
+
+    def forward(self, input):
+        if self.n_adj != 0:
+            input = torch.cat([input[..., -self.n_adj*self.dilation:], input, input[..., :self.n_adj*self.dilation]], dim=2)
+        return self.fc(input)
+
+_conv_factory = {
+    'grid': CircConv,
+    'dgrid': DilatedCircConv
+}
+
+class BasicBlock(nn.Module):
+    def __init__(self, state_dim, out_state_dim, conv_type, n_adj=4, dilation=1):
+        super(BasicBlock, self).__init__()
+        if conv_type == 'grid':
+            self.conv = _conv_factory[conv_type](state_dim, out_state_dim, n_adj)
+        else:
+            self.conv = _conv_factory[conv_type](state_dim, out_state_dim, n_adj, dilation)
+        self.relu = nn.ReLU(inplace=True)
+        self.norm = nn.BatchNorm1d(out_state_dim)
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.relu(x)
+        x = self.norm(x)
+        return x
+
+class Snake(nn.Module):
+    def __init__(self, state_dim, feature_dim, conv_type='dgrid'):
+        super(Snake, self).__init__()
+        self.head = BasicBlock(feature_dim, state_dim, conv_type)
+        self.res_layer_num = 7
+        dilation = [1, 1, 1, 2, 2, 4, 4]
+        n_adj = 4
+        for i in range(self.res_layer_num):
+            if dilation[i] == 0:
+                conv_type = 'grid'
+            else:
+                conv_type = 'dgrid'
+            conv = BasicBlock(state_dim, state_dim, conv_type, n_adj=n_adj, dilation=dilation[i])
+            self.__setattr__('res' + str(i), conv)
+
+        fusion_state_dim = 256
+
+        self.fusion = nn.Conv1d(state_dim * (self.res_layer_num + 1), fusion_state_dim, 1)
+
+        self.prediction = nn.Sequential(
+            nn.Conv1d(state_dim * (self.res_layer_num + 1) + fusion_state_dim, 256, 1),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(256, 64, 1),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(64, 2, 1)
+        )
+
+    def forward(self, x):
+        states = []
+        x = self.head(x)
+        states.append(x)
+        for i in range(self.res_layer_num):
+            x = self.__getattr__('res' + str(i))(x) + x
+            states.append(x)
+
+        state = torch.cat(states, dim=1)
+
+        global_state = torch.max(self.fusion(state), dim=2, keepdim=True)[0]
+        global_state = global_state.expand(global_state.size(0), global_state.size(1), state.size(2))
+        state = torch.cat([global_state, state], dim=1)
+
+        x = self.prediction(state)
+
+        return x
 
 def collect_training(poly, ct_01):
     batch_size = ct_01.size(0)
     poly = torch.cat([poly[i][ct_01[i]] for i in range(batch_size)], dim=0)
     return poly
+
+def prepare_training(ret, batch, ro):  # output, batch, self.ro = 4.
+    ct_01 = batch['ct_01'].byte()
+    init = {}
+
+    init.update({'img_gt_polys': collect_training(batch['img_gt_polys'], ct_01)})
+    init.update({'img_init_polys': ret['poly_coarse'].detach() / ro})
+    can_init_polys = img_poly_to_can_poly(ret['poly_coarse'].detach() / ro)
+    init.update({'can_init_polys': can_init_polys})
+
+    ct_num = batch['meta']['ct_num']
+    init.update({'py_ind': torch.cat([torch.full([ct_num[i]], i) for i in range(ct_01.size(0))], dim=0)})
+    init.update({'py_ind': init['py_ind']})
+    init['py_ind'] = init['py_ind'].to(ct_01.device)
+
+    return init
 
 def img_poly_to_can_poly(img_poly):
     if len(img_poly) == 0:
@@ -433,6 +284,283 @@ def get_gcn_feature(cnn_feature, img_poly, ind, h, w):
         feature = torch.nn.functional.grid_sample(cnn_feature[i:i+1], poly)[0].permute(1, 0, 2)
         gcn_feature[ind == i] = feature
     return gcn_feature
+
+def prepare_testing_init(polys, ro):
+    polys = polys / ro
+    can_init_polys = img_poly_to_can_poly(polys)
+    img_init_polys = polys
+    ind = torch.zeros((img_init_polys.size(0), ), dtype=torch.int32, device=img_init_polys.device)
+    init = {'img_init_polys': img_init_polys, 'can_init_polys': can_init_polys, 'py_ind': ind}
+    return init
+
+class Evolution(nn.Module):
+    def __init__(self, evole_ietr_num=3, evolve_stride=1., ro=4.):
+        super(Evolution, self).__init__()
+        assert evole_ietr_num >= 1
+        self.evolve_stride = evolve_stride
+        self.ro = ro
+        self.evolve_gcn = Snake(state_dim=128, feature_dim=64 + 2, conv_type='dgrid')
+        self.iter = evole_ietr_num - 1  # 2
+        for i in range(self.iter):
+            evolve_gcn = Snake(state_dim=128, feature_dim=64 + 2, conv_type='dgrid')
+            self.__setattr__('evolve_gcn' + str(i), evolve_gcn)
+
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d) or isinstance(m, nn.Conv2d):
+                m.weight.data.normal_(0.0, 0.01)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+    def prepare_training(self, output, batch):
+        init = prepare_training(output, batch, self.ro)
+        return init
+
+    def prepare_testing_init(self, output):
+        init = prepare_testing_init(output['poly_coarse'], self.ro)
+        return init
+
+    def prepare_testing_evolve(self, output, h, w):
+        img_init_polys = output['img_init_polys']
+        img_init_polys[..., 0] = torch.clamp(img_init_polys[..., 0], min=0, max=w - 1)
+        img_init_polys[..., 1] = torch.clamp(img_init_polys[..., 1], min=0, max=h - 1)
+        output.update({'img_init_polys': img_init_polys})
+        return img_init_polys
+
+    def evolve_poly(self, snake, cnn_feature, i_it_poly, c_it_poly, ind, stride=1.,
+                    ignore=False):  # evolve_gcn, cnn_feature, py_pred, c_py_pred, init['py_ind'], stride=self.evolve_stride
+        if ignore:
+            return i_it_poly * self.ro
+        if len(i_it_poly) == 0:
+            return torch.zeros_like(i_it_poly)
+        h, w = cnn_feature.size(2), cnn_feature.size(3)
+        init_feature = get_gcn_feature(cnn_feature, i_it_poly, ind, h, w)
+        c_it_poly = c_it_poly * self.ro
+        init_input = torch.cat([init_feature, c_it_poly.permute(0, 2, 1)], dim=1)
+        offset = snake(init_input).permute(0, 2, 1)
+        i_poly = i_it_poly * self.ro + offset * stride
+        return i_poly
+
+    def foward_train(self, output, batch, cnn_feature):
+        ret = output
+        init = self.prepare_training(output, batch)
+        py_pred = self.evolve_poly(self.evolve_gcn, cnn_feature, init['img_init_polys'],
+                                   init['can_init_polys'], init['py_ind'], stride=self.evolve_stride)
+        py_preds = [py_pred]
+        for i in range(self.iter):  # 2
+            py_pred = py_pred / self.ro
+            c_py_pred = img_poly_to_can_poly(py_pred)
+            evolve_gcn = self.__getattr__('evolve_gcn' + str(i))
+            py_pred = self.evolve_poly(evolve_gcn, cnn_feature, py_pred, c_py_pred,
+                                       init['py_ind'], stride=self.evolve_stride)
+            py_preds.append(py_pred)
+        ret.update({'py_pred': py_preds, 'img_gt_polys': init['img_gt_polys'] * self.ro})
+        return output
+
+    def foward_test(self, output, cnn_feature, ignore):
+        ret = output
+        with torch.no_grad():
+            init = self.prepare_testing_init(output)
+            img_init_polys = self.prepare_testing_evolve(init, cnn_feature.size(2), cnn_feature.size(3))
+            py = self.evolve_poly(self.evolve_gcn, cnn_feature, img_init_polys, init['can_init_polys'], init['py_ind'],
+                                  ignore=ignore[0], stride=self.evolve_stride)
+            pys = [py, ]
+            for i in range(self.iter):
+                py = py / self.ro
+                c_py = img_poly_to_can_poly(py)
+                evolve_gcn = self.__getattr__('evolve_gcn' + str(i))
+                py = self.evolve_poly(evolve_gcn, cnn_feature, py, c_py, init['py_ind'],
+                                      ignore=ignore[i + 1], stride=self.evolve_stride)
+                pys.append(py)
+            ret.update({'py': pys})
+        return output
+
+    def forward(self, output, cnn_feature, batch=None, test_stage='final-dml'):
+        if batch is not None and 'test' not in batch['meta']:
+            self.foward_train(output, batch, cnn_feature)
+        else:
+            ignore = [False] * (self.iter + 1)
+            if test_stage == 'coarse' or test_stage == 'init':
+                ignore = [True for _ in ignore]
+            if test_stage == 'final':
+                ignore[-1] = True
+            self.foward_test(output, cnn_feature, ignore=ignore)
+        return output
+
+def nms(heat, kernel=3):
+    pad = (kernel - 1) // 2
+
+    hmax = nn.functional.max_pool2d(
+        heat, (kernel, kernel), stride=1, padding=pad)
+    keep = (hmax == heat).float()
+    return heat * keep
+
+def gather_feat(feat, ind, mask=None):
+    dim = feat.size(2)
+    ind = ind.unsqueeze(2).expand(ind.size(0), ind.size(1), dim)
+    feat = feat.gather(1, ind)
+    if mask is not None:
+        mask = mask.unsqueeze(2).expand_as(feat)
+        feat = feat[mask]
+        feat = feat.view(-1, dim)
+    return feat
+
+def transpose_and_gather_feat(feat, ind):
+    feat = feat.permute(0, 2, 3, 1).contiguous()
+    feat = feat.view(feat.size(0), -1, feat.size(3))
+    feat = gather_feat(feat, ind)
+    return feat
+
+def topk(scores, K=100):
+    batch, cat, height, width = scores.size()
+
+    topk_scores, topk_inds = torch.topk(scores.view(batch, cat, -1), K)
+
+    topk_inds = topk_inds % (height * width)
+    topk_ys = (topk_inds / width).int().float()
+    topk_xs = (topk_inds % width).int().float()
+    topk_score, topk_ind = torch.topk(topk_scores.view(batch, -1), K)
+    topk_clses = (topk_ind / K).int()
+    topk_inds = gather_feat(
+        topk_inds.view(batch, -1, 1), topk_ind).view(batch, K)
+    topk_ys = gather_feat(topk_ys.view(batch, -1, 1), topk_ind).view(batch, K)
+    topk_xs = gather_feat(topk_xs.view(batch, -1, 1), topk_ind).view(batch, K)
+    return topk_score, topk_inds, topk_clses, topk_ys, topk_xs
+
+def decode_ct_hm(ct_hm, wh, reg=None, K=100, stride=10.):
+    batch, cat, height, width = ct_hm.size()
+    ct_hm = nms(ct_hm)
+    scores, inds, clses, ys, xs = topk(ct_hm, K=K)
+    wh = transpose_and_gather_feat(wh, inds)
+    wh = wh.view(batch, K, -1, 2)
+
+    if reg is not None:
+        reg = transpose_and_gather_feat(reg, inds)
+        reg = reg.view(batch, K, 2)
+        xs = xs.view(batch, K, 1) + reg[:, :, 0:1]
+        ys = ys.view(batch, K, 1) + reg[:, :, 1:2]
+    else:
+        xs = xs.view(batch, K, 1)
+        ys = ys.view(batch, K, 1)
+
+    clses = clses.view(batch, K, 1).float()
+    scores = scores.view(batch, K, 1)
+    ct = torch.cat([xs, ys], dim=2)
+    poly = ct.unsqueeze(2).expand(batch, K, wh.size(2), 2) + wh * stride
+    detection = torch.cat([ct, scores, clses], dim=2)
+    return poly, detection
+
+def clip_to_image(poly, h, w):
+    poly[..., :2] = torch.clamp(poly[..., :2], min=0)
+    poly[..., 0] = torch.clamp(poly[..., 0], max=w-1)
+    poly[..., 1] = torch.clamp(poly[..., 1], max=h-1)
+    return poly
+
+def get_gcn_feature(cnn_feature, img_poly, ind, h, w): #feature shape [16, 64, 128, 128], points shape [154,128+1,2], ct_img_idx, h, w
+    img_poly = img_poly.clone()
+    img_poly[..., 0] = img_poly[..., 0] / (w / 2.) - 1
+    img_poly[..., 1] = img_poly[..., 1] / (h / 2.) - 1
+    batch_size = cnn_feature.size(0)
+    gcn_feature = torch.zeros([img_poly.size(0), cnn_feature.size(1), img_poly.size(1)]).to(img_poly.device)
+    for i in range(batch_size):
+        poly = img_poly[ind == i].unsqueeze(0)
+        feature = torch.nn.functional.grid_sample(cnn_feature[i:i+1], poly)[0].permute(1, 0, 2)
+        gcn_feature[ind == i] = feature
+    return gcn_feature
+
+class Refine(torch.nn.Module):  # cnn_feature, ct, init_polys, ct_img_idx.clone()
+    def __init__(self, c_in=64, num_point=128, stride=4.):
+        super(Refine, self).__init__()
+        self.num_point = num_point
+        self.stride = stride
+        self.trans_feature = torch.nn.Sequential(torch.nn.Conv2d(c_in, 256, kernel_size=3,
+                                                                 padding=1, bias=True),
+                                                 torch.nn.ReLU(inplace=True),
+                                                 torch.nn.Conv2d(256, 64, kernel_size=1,
+                                                                 stride=1, padding=0, bias=True))
+        self.trans_poly = torch.nn.Linear(in_features=((num_point + 1) * 64),
+                                          out_features=num_point * 4, bias=False)
+        self.trans_fuse = torch.nn.Linear(in_features=num_point * 4,
+                                          out_features=num_point * 2, bias=True)
+
+    def global_deform(self, points_features, init_polys):
+        poly_num = init_polys.size(0)
+        points_features = self.trans_poly(points_features)
+        offsets = self.trans_fuse(points_features).view(poly_num, self.num_point, 2)
+        coarse_polys = offsets * self.stride + init_polys.detach()
+        return coarse_polys
+
+    def forward(self, feature, ct_polys, init_polys, ct_img_idx,
+                ignore=False):  # feature=cnn_feature, ct_polys=ct, init_polys=init_polys, ct_img_idx=ct_img_idx.clone()
+        if ignore or len(init_polys) == 0:
+            return init_polys
+        h, w = feature.size(2), feature.size(3)
+        poly_num = ct_polys.size(0)
+
+        feature = self.trans_feature(feature)  # [16,64,128,128] -> [16,64,128,128]
+
+        ct_polys = ct_polys.unsqueeze(1).expand(init_polys.size(0), 1, init_polys.size(2))
+        points = torch.cat([ct_polys, init_polys], dim=1)  # [154,128+1,2] 中心点和边框点的坐标
+        feature_points = get_gcn_feature(feature, points, ct_img_idx, h, w).view(poly_num, -1)
+        coarse_polys = self.global_deform(feature_points, init_polys)
+        return coarse_polys
+
+class Decode(torch.nn.Module):
+    def __init__(self, c_in=64, num_point=128, init_stride=10., coarse_stride=4., down_sample=4., min_ct_score=0.05):
+        super(Decode, self).__init__()
+        self.stride = init_stride
+        self.down_sample = down_sample
+        self.min_ct_score = min_ct_score
+        self.refine = Refine(c_in=c_in, num_point=num_point, stride=coarse_stride)
+
+    def train_decode(self, data_input, output, cnn_feature):  # data_input=batch, cnn_feature=cnn_feature, ouput=output
+        wh_pred = output['wh']  # torch.Size([16, 256, 128, 128])  coco 128*2
+        ct_01 = data_input['ct_01'].bool()
+        ct_ind = data_input['ct_ind'][ct_01]
+
+        ct_img_idx = data_input['ct_img_idx'][ct_01]
+        _, _, height, width = data_input['ct_hm'].size()  # 128,128
+        ct_x, ct_y = ct_ind % width, ct_ind // width
+
+        if ct_x.size(0) == 0:
+            ct_offset = wh_pred[ct_img_idx, :, ct_y, ct_x].view(ct_x.size(0), 1, 2)
+        else:
+            ct_offset = wh_pred[ct_img_idx, :, ct_y, ct_x].view(ct_x.size(0), -1, 2)
+
+        ct_x, ct_y = ct_x[:, None].to(torch.float32), ct_y[:, None].to(torch.float32)
+        ct = torch.cat([ct_x, ct_y], dim=1)
+
+        init_polys = ct_offset * self.stride + ct.unsqueeze(1).expand(ct_offset.size(0),
+                                                                      ct_offset.size(1), ct_offset.size(2))
+        coarse_polys = self.refine(cnn_feature, ct, init_polys, ct_img_idx.clone())  # global deformation
+
+        output.update({'poly_init': init_polys * self.down_sample})
+        output.update({'poly_coarse': coarse_polys * self.down_sample})
+        return
+
+    def test_decode(self, cnn_feature, output, K=100, min_ct_score=0.05, ignore_gloabal_deform=False):
+        hm_pred, wh_pred = output['ct_hm'], output['wh']
+        poly_init, detection = decode_ct_hm(torch.sigmoid(hm_pred), wh_pred,
+                                            K=K, stride=self.stride)
+        valid = detection[0, :, 2] >= min_ct_score
+        poly_init, detection = poly_init[0][valid], detection[0][valid]
+
+        init_polys = clip_to_image(poly_init, cnn_feature.size(2), cnn_feature.size(3))
+        output.update({'poly_init': init_polys * self.down_sample})
+
+        img_id = torch.zeros((len(poly_init),), dtype=torch.int64)
+        poly_coarse = self.refine(cnn_feature, detection[:, :2], poly_init, img_id, ignore=ignore_gloabal_deform)
+        coarse_polys = clip_to_image(poly_coarse, cnn_feature.size(2), cnn_feature.size(3))
+        output.update({'poly_coarse': coarse_polys * self.down_sample})
+        output.update({'detection': detection})
+        return
+
+    def forward(self, data_input, cnn_feature, output=None, is_training=True, ignore_gloabal_deform=False):
+        if is_training:
+            self.train_decode(data_input, output, cnn_feature)
+        else:
+            self.test_decode(cnn_feature, output, min_ct_score=self.min_ct_score,
+                             ignore_gloabal_deform=ignore_gloabal_deform)
+
 
 @HEADS.register_module()
 class E2ECHead(BaseDenseHead, BBoxTestMixin):
@@ -498,47 +626,17 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
         self.loss_iter1 = build_loss(loss_iter1)
         self.loss_iter2 = build_loss(loss_iter2)
 
-        self.refine = Refine(c_in=in_channel, num_point=points_per_poly, stride=coarse_stride)
-        self.d = Douglas()
-        self.gcn = Evolution(evole_ietr_num=self.evole_ietr_num, evolve_stride=self.evolve_stride,
-                             ro=self.down_sample)
+        self.cfg = cfg
+
+        self.train_decoder = Decode(num_point=self.cfg.commen.points_per_poly, init_stride=self.cfg.model.init_stride,
+                                    coarse_stride=self.cfg.model.coarse_stride, down_sample=self.cfg.commen.down_ratio,
+                                    min_ct_score=self.cfg.test.ct_score)
+        self.gcn = Evolution(evole_ietr_num=self.cfg.model.evolve_iters, evolve_stride=self.cfg.model.evolve_stride,
+                             ro=self.cfg.commen.down_ratio)
 
         self.train_cfg = train_cfg
         self.test_cfg = test_cfg
         self.fp16_enabled = False
-    
-    def train_decode(self, center_heatmap_pred, wh_pred, offset_pred, cnn_feature, data_input): #it's not correct completely -> [h/4,w/4,80], [h/4,w/4,2], [h/4,w/4,2] 
-        """
-        center_heatmap_pred [16,80,128,128]
-        wh_pred [16,256,128,128]
-        offset_pred [16,2,128,128]
-        cnn_feature [16,64,128,128]
-        """
-        batch_size, _, height, width = center_heatmap_pred.size() 
-        
-        ct_01 = data_input['ct_01'].bool()
-        ct_ind = data_input['ct_ind'][ct_01]
-        ct_img_idx = data_input['ct_img_idx'][ct_01] 
-        ct_x, ct_y = ct_ind % width, ct_ind // width # 第几行，第几列，即解析出坐标
-
-        if ct_x.size(0) == 0:
-            ct_offset = wh_pred[ct_img_idx, :, ct_y, ct_x].view(ct_x.size(0), 1, 2)
-        else:
-            ct_offset = wh_pred[ct_img_idx, :, ct_y, ct_x].view(ct_x.size(0), -1, 2) # Tensor shape (total ct_num, points_per_poly, 2) 
-
-        ct_x, ct_y = ct_x[:, None].to(torch.float32), ct_y[:, None].to(torch.float32)
-        ct = torch.cat([ct_x, ct_y], dim=1)
-
-        init_polys = ct_offset * self.stride + ct.unsqueeze(1).expand(ct_offset.size(0), ct_offset.size(1), ct_offset.size(2))
-        coarse_polys = self.refine(cnn_feature, ct, init_polys, ct_img_idx.clone()) # global deformation
-
-
-        poly_init = init_polys * self.down_sample
-        poly_coarse = coarse_polys * self.down_sample
-
-        # output.update({'poly_init': init_polys * self.down_sample})
-        # output.update({'poly_coarse': coarse_polys * self.down_sample})
-        return poly_init, poly_coarse
 
     def _build_head(self, in_channel, feat_channel, out_channel):
         """Build head for each branch."""
@@ -557,7 +655,7 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
                 if isinstance(m, nn.Conv2d):
                     normal_init(m, std=0.001)
 
-    def forward(self, feats):
+    def forward(self, feats, data_input):
         """Forward features. Notice CenterNet head does not use FPN.
 
         Args:
@@ -573,7 +671,29 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
                channels number is 2.
             cnn_features (List[Tensor])
         """
-        return multi_apply(self.forward_single, feats)
+        outs = multi_apply(self.forward_single, feats)
+        center_heatmap_preds, wh_preds, offset_preds, cnn_features = outs
+        center_heatmap_preds = torch.stack(center_heatmap_preds, 0)
+        wh_preds = torch.stack(wh_preds, 0)
+        offset_preds = torch.stack(offset_preds, 0)
+        cnn_features = torch.stack(cnn_features, 0)
+
+        output = {}
+        output['ct_hm'] = center_heatmap_preds
+        output['wh'] = wh_preds
+
+        if 'test' not in data_input['meta']:
+            self.train_decoder(data_input, cnn_features, output, is_training=True)
+        else:
+            with torch.no_grad(): #测试阶段不需要梯度
+                if self.test_stage == 'init':
+                    ignore = True
+                else:
+                    ignore = False
+                self.train_decoder(data_input, cnn_features, output, is_training=False, ignore_gloabal_deform=ignore)
+        output = self.gcn(output, cnn_features, data_input, test_stage=self.cfg.test.test_stage) #output已经更新了poly_init和poly_coarse 图网络
+
+        return output
 
     def forward_single(self, feat):
         """Forward feature of a single level.
@@ -601,8 +721,9 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
              offset_preds,
              cnn_features,
              gt_bboxes,
-             gt_semantic_seg,
+             gt_masks,
              gt_labels,
+             data_input,
              img_metas,
              gt_bboxes_ignore=None):
         """Compute losses of the head.
@@ -681,7 +802,7 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
                 int_ctx, int_cty = int(sum(bbox[0::2]) / 2), int(sum(bbox[1::2]) / 2)
                 ct_ind[i].append(int_cty * width + int_ctx)
 
-        for i, instance_poly in enumerate(gt_semantic_seg):
+        for i, instance_poly in enumerate(gt_masks):
             for j in range(len(instance_poly)):  # instance_ploy: 一张图片的所有poly
                 poly = instance_poly[j]
                 img_gt_poly = uniformsample(poly, len(poly) * self.points_per_poly)
@@ -751,8 +872,9 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
                       x,
                       img_metas,
                       gt_bboxes,
-                      gt_semantic_seg,
-                      gt_labels=None,
+                      gt_masks,
+                      gt_labels,
+                      data_input,
                       gt_bboxes_ignore=None,
                       proposal_cfg=None,
                       **kwargs):
@@ -775,18 +897,18 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
                 losses: (dict[str, Tensor]): A dictionary of loss components.
                 proposal_list (list[Tensor]): Proposals of each image.
         """
-        outs = self(x)
+        outs = self(x, data_input) # x是FPN输出的features，self是E2ECHead，()是self.forward
         if gt_labels is None:
-            loss_inputs = outs + (gt_bboxes, gt_semantic_seg, img_metas)
+            loss_inputs = outs + (gt_bboxes, gt_masks, data_input, img_metas)
         else:
-            loss_inputs = outs + (gt_bboxes, gt_semantic_seg, gt_labels, img_metas)
+            loss_inputs = outs + (gt_bboxes, gt_masks, gt_labels, data_input, img_metas)
         losses = self.loss(*loss_inputs, gt_bboxes_ignore=gt_bboxes_ignore)
         if proposal_cfg is None:
             return losses
         else:
             proposal_list = self.get_bboxes(
                 *outs, img_metas=img_metas, cfg=proposal_cfg)
-            return losses, proposal_list
+        return losses, proposal_list
 
     def get_targets(self, gt_bboxes, gt_labels, feat_shape, img_shape):
         """Compute regression and classification targets in multiple images.

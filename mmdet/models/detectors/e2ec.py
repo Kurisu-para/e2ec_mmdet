@@ -6,7 +6,7 @@ from mmdet.models.builder import DETECTORS
 from ...core.utils import flip_tensor
 from .single_stage import SingleStageDetector
 
-
+# 16:29
 @DETECTORS.register_module()
 class E2EC(SingleStageDetector):
     """Implementation of E2EC
@@ -27,8 +27,9 @@ class E2EC(SingleStageDetector):
                       img,
                       img_metas,
                       gt_bboxes,
+                      gt_masks,
                       gt_labels,
-                      gt_semantic_seg,
+                      data_input,
                       gt_bboxes_ignore=None):
             """
             Args:
@@ -51,8 +52,8 @@ class E2EC(SingleStageDetector):
             super(SingleStageDetector, self).forward_train(img, img_metas)
             x = self.extract_feat(img)
 
-            losses = self.bbox_head.forward_train(x, img_metas, gt_bboxes,
-                                                gt_labels, gt_semantic_seg, gt_bboxes_ignore)
+            losses = self.bbox_head.forward_train(x, img_metas, gt_bboxes, gt_masks,
+                                                  gt_labels, data_input, gt_bboxes_ignore)
             return losses
 
     def merge_aug_results(self, aug_results, with_nms):

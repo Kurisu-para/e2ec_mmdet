@@ -4,13 +4,12 @@ _base_ = [
     '../_base_/schedules/schedule_1x.py',
     '../_base_/default_runtime.py'
 ]
-
 model = dict(
-    type = 'E2EC',
-    backbone = dict(
-        type = 'ResNet',
-        depth = 18,
-        norm_eval = False,
+    type='E2EC',
+    backbone=dict(
+        type='ResNet',
+        depth=18,
+        norm_eval=False,
         norm_cfg=dict(type='BN'),
         init_cfg=dict(type='Pretrained', checkpoint='torchvision://resnet18')),
     neck=dict(
@@ -39,7 +38,7 @@ img_norm_cfg = dict(
 
 train_pipeline = [
     dict(type='LoadImageFromFile', to_float32=True, color_type='color'),
-    dict(type='LoadAnnotations', with_bbox=True, with_seg=True),
+    dict(type='LoadAnnotations', with_bbox=True),
     dict(
         type='PhotoMetricDistortion',
         brightness_delta=32,
@@ -54,12 +53,13 @@ train_pipeline = [
         std=[1, 1, 1],
         to_rgb=True,
         test_pad_mode=None),
+    dict(type='LoadAnnotations', with_bbox=False, with_label=False, with_mask=True, poly2mask=False),
     dict(type='Resize', img_scale=(512, 512), keep_ratio=True),
     dict(type='RandomFlip', flip_ratio=0.5),
     dict(type='Normalize', **img_norm_cfg),
+    dict(type='SegRescale', scale_factor=1 / 8),
     dict(type='DefaultFormatBundle'),
-    # dict(type='Collect', keys=['img', 'gt_bboxes', 'gt_labels'])
-    dict(type='Collect', keys=['img', 'gt_bboxes', 'gt_labels', 'gt_semantic_seg'])
+    dict(type='Collect', keys=['img', 'gt_bboxes', 'gt_masks', 'gt_labels', 'data_input'])
 ]
 
 test_pipeline = [
@@ -100,12 +100,14 @@ data = dict(
     samples_per_gpu=16,
     workers_per_gpu=4,
     train=dict(
+        pipeline=train_pipeline,
         _delete_=True,
         type='RepeatDataset',
         times=5,
         dataset=dict(
             type=dataset_type,
             ann_file=data_root + 'annotations/instances_train2017.json',
+            seg_prefix=data_root + 'stuffthingmaps/train2017/',
             img_prefix=data_root + 'train2017/',
             pipeline=train_pipeline)),
     val=dict(

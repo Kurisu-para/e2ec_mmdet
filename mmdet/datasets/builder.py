@@ -5,12 +5,17 @@ import random
 import warnings
 from functools import partial
 
+from collections.abc import Mapping, Sequence
+
 import numpy as np
 import torch
-from mmcv.parallel import collate
+import torch.nn.functional as F
+# from mmcv.parallel import collate
+from mmcv.parallel import DataContainer
 from mmcv.runner import get_dist_info
 from mmcv.utils import TORCH_VERSION, Registry, build_from_cfg, digit_version
 from torch.utils.data import DataLoader
+from torch.utils.data.dataloader import default_collate
 
 from .samplers import (DistributedGroupSampler, DistributedSampler,
                        GroupSampler, InfiniteBatchSampler,
@@ -28,6 +33,140 @@ if platform.system() != 'Windows':
 DATASETS = Registry('dataset')
 PIPELINES = Registry('pipeline')
 
+
+def collate_batch(batch):
+    data_input = {}
+    inp = {'inp': default_collate([b['inp'] for b in batch])}
+    meta = default_collate([b['meta'] for b in batch])
+    data_input.update(inp)
+    data_input.update({'meta': meta})
+
+    if 'test' in meta:
+        return data_input
+
+    #collate detection
+    ct_hm = default_collate([b['ct_hm'] for b in batch])
+    max_len = torch.max(meta['ct_num'])
+    batch_size = len(batch)
+    wh = torch.zeros([batch_size, max_len, 2], dtype=torch.float)
+    ct_cls = torch.zeros([batch_size, max_len], dtype=torch.int64)
+    ct_ind = torch.zeros([batch_size, max_len], dtype=torch.int64)
+    ct_01 = torch.zeros([batch_size, max_len], dtype=torch.bool)
+    ct_img_idx = torch.zeros([batch_size, max_len], dtype=torch.int64)
+    for i in range(batch_size):
+        ct_01[i, :meta['ct_num'][i]] = 1
+        ct_img_idx[i, :meta['ct_num'][i]] = i
+
+    if max_len != 0:
+        wh[ct_01] = torch.Tensor(sum([b['wh'] for b in batch], []))
+        # reg[ct_01] = torch.Tensor(sum([b['reg'] for b in batch], []))
+        ct_cls[ct_01] = torch.LongTensor(sum([b['ct_cls'] for b in batch], []))
+        ct_ind[ct_01] = torch.LongTensor(sum([b['ct_ind'] for b in batch], []))
+    detection = {'ct_hm': ct_hm, 'ct_cls': ct_cls, 'ct_ind': ct_ind, 'ct_01': ct_01, 'ct_img_idx': ct_img_idx}
+    data_input.update(detection)
+
+    #collate sementation
+    num_points_per_poly = 128
+    img_gt_polys = torch.zeros([batch_size, max_len, num_points_per_poly, 2], dtype=torch.float)
+    can_gt_polys = torch.zeros([batch_size, max_len, num_points_per_poly, 2], dtype=torch.float)
+    keyPointsMask = torch.zeros([batch_size, max_len, num_points_per_poly], dtype=torch.float)
+
+    if max_len != 0:
+        img_gt_polys[ct_01] = torch.Tensor(np.array(sum([b['img_gt_polys'] for b in batch], [])))
+        can_gt_polys[ct_01] = torch.Tensor(np.array(sum([b['can_gt_polys'] for b in batch], [])))
+        keyPointsMask[ct_01] = torch.Tensor(np.array(sum([b['keypoints_mask'] for b in batch], [])))
+    data_input.update({'img_gt_polys': img_gt_polys, 'can_gt_polys': can_gt_polys,
+                       'keypoints_mask': keyPointsMask})
+
+    return data_input
+
+def collate(batch, samples_per_gpu=1):
+    """Puts each data field into a tensor/DataContainer with outer dimension
+    batch size.
+    Extend default_collate to add support for
+    :type:`~mmcv.parallel.DataContainer`. There are 3 cases.
+    1. cpu_only = True, e.g., meta data
+    2. cpu_only = False, stack = True, e.g., images tensors
+    3. cpu_only = False, stack = False, e.g., gt bboxes
+    """
+
+    if not isinstance(batch, Sequence):
+        raise TypeError(f'{batch.dtype} is not supported.')
+
+    if isinstance(batch[0], DataContainer):
+        stacked = []
+        if batch[0].cpu_only:
+            for i in range(0, len(batch), samples_per_gpu):
+                stacked.append(
+                    [sample.data for sample in batch[i:i + samples_per_gpu]])
+            return DataContainer(
+                stacked, batch[0].stack, batch[0].padding_value, cpu_only=True)
+        elif batch[0].stack:
+            for i in range(0, len(batch), samples_per_gpu):
+                assert isinstance(batch[i].data, torch.Tensor)
+
+                if batch[i].pad_dims is not None:
+                    ndim = batch[i].dim()
+                    assert ndim > batch[i].pad_dims
+                    max_shape = [0 for _ in range(batch[i].pad_dims)]
+                    for dim in range(1, batch[i].pad_dims + 1):
+                        max_shape[dim - 1] = batch[i].size(-dim)
+                    for sample in batch[i:i + samples_per_gpu]:
+                        for dim in range(0, ndim - batch[i].pad_dims):
+                            assert batch[i].size(dim) == sample.size(dim)
+                        for dim in range(1, batch[i].pad_dims + 1):
+                            max_shape[dim - 1] = max(max_shape[dim - 1],
+                                                     sample.size(-dim))
+                    padded_samples = []
+                    for sample in batch[i:i + samples_per_gpu]:
+                        pad = [0 for _ in range(batch[i].pad_dims * 2)]
+                        for dim in range(1, batch[i].pad_dims + 1):
+                            pad[2 * dim -
+                                1] = max_shape[dim - 1] - sample.size(-dim)
+                        padded_samples.append(
+                            F.pad(
+                                sample.data, pad, value=sample.padding_value))
+                    stacked.append(default_collate(padded_samples))
+                elif batch[i].pad_dims is None:
+                    stacked.append(
+                        default_collate([
+                            sample.data
+                            for sample in batch[i:i + samples_per_gpu]
+                        ]))
+                else:
+                    raise ValueError(
+                        'pad_dims should be either None or integers (1-3)')
+
+        else:
+            for i in range(0, len(batch), samples_per_gpu):
+                stacked.append(
+                    [sample.data for sample in batch[i:i + samples_per_gpu]])
+        return DataContainer(stacked, batch[0].stack, batch[0].padding_value)
+    elif isinstance(batch[0], Sequence):
+        transposed = zip(*batch)
+        return [collate(samples, samples_per_gpu) for samples in transposed]
+    elif isinstance(batch[0], Mapping):
+        return {
+            key: collate([d[key] for d in batch], samples_per_gpu)
+            for key in batch[0]
+        }
+    else:
+        return default_collate(batch)
+
+
+def main_collate(batch, samples_per_gpu=1):
+    mybatch = [b['data_input'] for b in batch]
+    mybatch = collate_batch(mybatch)
+    # mybatch = DataContainer(mybatch)
+    purebatch = []
+    for b in batch:
+        b.pop('data_input')
+        purebatch.append(b)
+
+    out = collate(purebatch, samples_per_gpu=samples_per_gpu)
+    out['data_input'] = mybatch
+
+    return out
 
 def _concat_dataset(cfg, default_args=None):
     from .dataset_wrappers import ConcatDataset
@@ -184,7 +323,7 @@ def build_dataloader(dataset,
         sampler=sampler,
         num_workers=num_workers,
         batch_sampler=batch_sampler,
-        collate_fn=partial(collate, samples_per_gpu=samples_per_gpu),
+        collate_fn=partial(main_collate, samples_per_gpu=samples_per_gpu),
         pin_memory=False,
         worker_init_fn=init_fn,
         **kwargs)
