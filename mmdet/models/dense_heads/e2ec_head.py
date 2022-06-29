@@ -1,7 +1,6 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import torch
 import torch.nn as nn
-from torch.utils.data.dataloader import default_collate
 import math
 import numpy as np
 from args import coco as cfg
@@ -20,133 +19,6 @@ from ..utils.gaussian_target import (get_local_maximum, get_topk_from_heatmap,
 from .base_dense_head import BaseDenseHead
 from .dense_test_mixins import BBoxTestMixin
 
-
-class Douglas:
-    D = 3
-    def sample(self, poly):
-        mask = np.zeros((poly.shape[0],), dtype=int)
-        mask[0] = 1
-        endPoint = poly[0: 1, :] + poly[-1:, :]
-        endPoint /= 2
-        poly_append = np.concatenate([poly, endPoint], axis=0)
-        self.compress(0, poly.shape[0], poly_append, mask)
-        return mask
-
-    def compress(self, idx1, idx2, poly, mask):
-        p1 = poly[idx1, :]
-        p2 = poly[idx2, :]
-        A = (p1[1] - p2[1])
-        B = (p2[0] - p1[0])
-        C = (p1[0] * p2[1] - p2[0] * p1[1])
-
-        m = idx1
-        n = idx2
-        if (n == m + 1):
-            return
-        d = abs(A * poly[m + 1: n, 0] + B * poly[m + 1: n, 1] + C) / math.sqrt(math.pow(A, 2) + math.pow(B, 2) + 1e-4)
-        max_idx = np.argmax(d)
-        dmax = d[max_idx]
-        max_idx = max_idx + m + 1
-
-        if dmax > self.D:
-            mask[max_idx] = 1
-            self.compress(idx1, max_idx, poly, mask)
-            self.compress(max_idx, idx2, poly, mask)
-
-def uniformsample(pgtnp_px2, newpnum):
-    pnum, cnum = pgtnp_px2.shape
-    assert cnum == 2
-
-    idxnext_p = (np.arange(pnum, dtype=np.int32) + 1) % pnum
-    pgtnext_px2 = pgtnp_px2[idxnext_p]
-    edgelen_p = np.sqrt(np.sum((pgtnext_px2 - pgtnp_px2) ** 2, axis=1))
-    edgeidxsort_p = np.argsort(edgelen_p)
-
-    # two cases
-    # we need to remove gt points
-    # we simply remove shortest paths
-    if pnum > newpnum:
-        edgeidxkeep_k = edgeidxsort_p[pnum - newpnum:]
-        edgeidxsort_k = np.sort(edgeidxkeep_k)
-        pgtnp_kx2 = pgtnp_px2[edgeidxsort_k]
-        assert pgtnp_kx2.shape[0] == newpnum
-        return pgtnp_kx2
-    # we need to add gt points
-    # we simply add it uniformly
-    else:
-        edgenum = np.round(edgelen_p * newpnum / np.sum(edgelen_p)).astype(np.int32)
-        for i in range(pnum):
-            if edgenum[i] == 0:
-                edgenum[i] = 1
-
-        # after round, it may has 1 or 2 mismatch
-        edgenumsum = np.sum(edgenum)
-        if edgenumsum != newpnum:
-
-            if edgenumsum > newpnum:
-
-                id = -1
-                passnum = edgenumsum - newpnum
-                while passnum > 0:
-                    edgeid = edgeidxsort_p[id]
-                    if edgenum[edgeid] > passnum:
-                        edgenum[edgeid] -= passnum
-                        passnum -= passnum
-                    else:
-                        passnum -= edgenum[edgeid] - 1
-                        edgenum[edgeid] -= edgenum[edgeid] - 1
-                        id -= 1
-            else:
-                id = -1
-                edgeid = edgeidxsort_p[id]
-                edgenum[edgeid] += newpnum - edgenumsum
-
-        assert np.sum(edgenum) == newpnum
-
-        psample = []
-        for i in range(pnum):
-            pb_1x2 = pgtnp_px2[i:i + 1]
-            pe_1x2 = pgtnext_px2[i:i + 1]
-
-            pnewnum = edgenum[i]
-            wnp_kx1 = np.arange(edgenum[i], dtype=np.float32).reshape(-1, 1) / edgenum[i]
-
-            pmids = pb_1x2 * (1 - wnp_kx1) + pe_1x2 * wnp_kx1
-            psample.append(pmids)
-
-        psamplenp = np.concatenate(psample, axis=0)
-        return psamplenp
-
-def four_idx(img_gt_poly):
-    x_min, y_min = np.min(img_gt_poly, axis=0)
-    x_max, y_max = np.max(img_gt_poly, axis=0)
-    center = [(x_min + x_max) / 2., (y_min + y_max) / 2.]
-    can_gt_polys = img_gt_poly.copy()
-    can_gt_polys[:, 0] -= center[0]
-    can_gt_polys[:, 1] -= center[1]
-    distance = np.sum(can_gt_polys ** 2, axis=1, keepdims=True) ** 0.5 + 1e-6
-    can_gt_polys /= np.repeat(distance, axis=1, repeats=2)
-    idx_bottom = np.argmax(can_gt_polys[:, 1])
-    idx_top = np.argmin(can_gt_polys[:, 1])
-    idx_right = np.argmax(can_gt_polys[:, 0])
-    idx_left = np.argmin(can_gt_polys[:, 0])
-    return [idx_bottom, idx_right, idx_top, idx_left]
-
-def get_img_gt(img_gt_poly, idx, t=128):
-    align = len(idx)
-    pointsNum = img_gt_poly.shape[0]
-    r = []
-    k = np.arange(0, t / align, dtype=float) / (t / align)
-    for i in range(align):
-        begin = idx[i]
-        end = idx[(i + 1) % align]
-        if begin > end:
-            end += pointsNum
-        r.append((np.round(((end - begin) * k).astype(int)) + begin) % pointsNum)
-    r = np.concatenate(r, axis=0)
-    return img_gt_poly[r, :]
-
-#---------------------------------------------------------------------------------------------
 
 class CircConv(nn.Module):
     def __init__(self, state_dim, out_state_dim=None, n_adj=4):
@@ -615,7 +487,7 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
         self.evolve_stride = evolve_stride
         self.heatmap_head = self._build_head(in_channel, feat_channel,
                                              num_classes)
-        self.wh_head = self._build_head(in_channel, feat_channel, 2 * self.points_per_poly)
+        self.wh_head = self._build_head(in_channel, feat_channel, 2 * points_per_poly)
         self.offset_head = self._build_head(in_channel, feat_channel, 2)
 
         self.loss_center_heatmap = build_loss(loss_center_heatmap)
@@ -693,7 +565,7 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
                 self.train_decoder(data_input, cnn_features, output, is_training=False, ignore_gloabal_deform=ignore)
         output = self.gcn(output, cnn_features, data_input, test_stage=self.cfg.test.test_stage) #output已经更新了poly_init和poly_coarse 图网络
 
-        return output
+        return (center_heatmap_preds, wh_preds, offset_preds, cnn_features, output)
 
     def forward_single(self, feat):
         """Forward feature of a single level.
@@ -720,6 +592,7 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
              wh_preds,
              offset_preds,
              cnn_features,
+             output,
              gt_bboxes,
              gt_masks,
              gt_labels,
@@ -749,22 +622,12 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
                 - loss_wh (Tensor): loss of hw heatmap
                 - loss_offset (Tensor): loss of offset heatmap.
         """
-        assert len(center_heatmap_preds) == len(wh_preds) == len(offset_preds) == len(cnn_features)
 
-        output = {}
-
-        output.update({'ct_hm': center_heatmap_preds})
-        output.update({'wh': wh_preds})
-
-        center_heatmap_pred = torch.stack(center_heatmap_preds, 0)
-        wh_pred = torch.stack(wh_preds, 0)
-        offset_pred = torch.stack(offset_preds, 0)
-        cnn_feature = torch.stack(cnn_features, 0)
-
-        batch_size, _, height, width = center_heatmap_pred.size() 
+        assert len(center_heatmap_preds) == len(wh_preds) == len(
+            offset_preds)
 
         target_result, avg_factor = self.get_targets(gt_bboxes, gt_labels,
-                                                     center_heatmap_pred.shape,
+                                                     center_heatmap_preds.shape,
                                                      img_metas[0]['pad_shape'])
 
         center_heatmap_target = target_result['center_heatmap_target']
@@ -772,73 +635,23 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
         offset_target = target_result['offset_target']
         wh_offset_target_weight = target_result['wh_offset_target_weight']
 
-        
-        ct_num = torch.zeros([batch_size], dtype=torch.int64)
-        for i, gt_bbox in enumerate(gt_bboxes):
-            ct_num[i] = gt_bbox(0)
+        keyPointsMask = data_input['keypoints_mask'][data_input['ct_01']]
 
-        max_len = torch.max(ct_num)
-        num_points_per_poly = self.points_per_poly
-
-        ct_01 = torch.zeros([batch_size, max_len], dtype=torch.bool)
-        ct_img_idx = torch.zeros([batch_size, max_len], dtype=torch.int64)
-        ct_ind = torch.zeros([batch_size, max_len], dtype=torch.int64)
-
-        # img_gt_polys = torch.zeros([batch_size, max_len, num_points_per_poly, 2], dtype=torch.float)
-        # can_gt_polys = torch.zeros([batch_size, max_len, num_points_per_poly, 2], dtype=torch.float)
-        # keyPointsMask = torch.zeros([batch_size, max_len, num_points_per_poly], dtype=torch.float)
-
-        img_gt_polys = []
-        can_gt_polys = []
-        keyPointsMask = []
-
-        for i in range(batch_size):
-            ct_01[i, :ct_num[i]] = 1
-            ct_img_idx[i, :ct_num[i]] = i
-
-        for i, gt_bbox in enumerate(gt_bboxes): # i属于0~bs
-            for j in range(gt_bbox.size(0)):
-                bbox = gt_bbox[j]  # bbox format [tl_x, tl_y, br_x, br_y]
-                int_ctx, int_cty = int(sum(bbox[0::2]) / 2), int(sum(bbox[1::2]) / 2)
-                ct_ind[i].append(int_cty * width + int_ctx)
-
-        for i, instance_poly in enumerate(gt_masks):
-            for j in range(len(instance_poly)):  # instance_ploy: 一张图片的所有poly
-                poly = instance_poly[j]
-                img_gt_poly = uniformsample(poly, len(poly) * self.points_per_poly)
-                idx = four_idx(img_gt_poly)
-                img_gt_poly = get_img_gt(img_gt_poly, idx)
-                can_gt_poly = img_poly_to_can_poly(img_gt_poly)
-                key_mask = self.d.sample(img_gt_poly)
-                keyPointsMask.append(key_mask)
-                img_gt_polys.append(img_gt_poly)
-                can_gt_polys.append(can_gt_poly)
-            
-
-        data_input = {'ct_num': ct_num, 'ct_01': ct_01, 'ct_img_idx': ct_img_idx, 'ct_ind': ct_ind, 'img_gt_polys': img_gt_polys, 'can_gt_polys': can_gt_polys,
-                      'keypoints_mask': keyPointsMask}
-        
-        poly_init, poly_coarse = self.train_decode(center_heatmap_pred, wh_pred, offset_pred, cnn_feature, data_input)
-
-        output.update({'poly_init': poly_init})
-        output.update({'poly_coarse': poly_coarse})
-        
-        output = self.gcn(output, cnn_feature, data_input) 
 
         # Since the channel of wh_target and offset_target is 2, the avg_factor
         # of loss_center_heatmap is always 1/2 of loss_wh and loss_offset.
         loss_center_heatmap = self.loss_center_heatmap(
-            center_heatmap_pred, center_heatmap_target, avg_factor=avg_factor)
-        loss_wh = self.loss_wh(
-            wh_pred,
-            wh_target,
-            wh_offset_target_weight,
-            avg_factor=avg_factor * 2)
-        loss_offset = self.loss_offset(
-            offset_pred,
-            offset_target,
-            wh_offset_target_weight,
-            avg_factor=avg_factor * 2)
+            center_heatmap_preds, center_heatmap_target, avg_factor=avg_factor)
+        # loss_wh = self.loss_wh(
+        #     wh_preds,
+        #     wh_target,
+        #     wh_offset_target_weight,
+        #     avg_factor=avg_factor * 2)
+        # loss_offset = self.loss_offset(
+        #     offset_preds,
+        #     offset_target,
+        #     wh_offset_target_weight,
+        #     avg_factor=avg_factor * 2)
         loss_init = self.loss_init(
             output['poly_init'],
             output['img_gt_polys'],
@@ -847,8 +660,12 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
             output['poly_coarse'],
             output['img_gt_polys'],
             reduction_override='mean')
-        loss_iter1 = self.loss_iter1(
-            output['py_pred'],
+        loss_iter10 = self.loss_iter1(
+            output['py_pred'][0],
+            output['img_gt_polys'],
+            reduction_override='mean')
+        loss_iter11 = self.loss_iter1(
+            output['py_pred'][1],
             output['img_gt_polys'],
             reduction_override='mean')
         loss_iter2 = self.loss_iter2(
@@ -860,11 +677,12 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
 
         return dict(
             loss_center_heatmap=loss_center_heatmap,
-            loss_wh=loss_wh,
-            loss_offset=loss_offset,
+            # loss_wh=loss_wh,
+            # loss_offset=loss_offset,
             loss_init=loss_init,
             loss_coarse=loss_coarse,
-            loss_iter1=loss_iter1,
+            loss_iter10=loss_iter10,
+            loss_iter11=loss_iter11,
             loss_iter2=loss_iter2
             )
     
