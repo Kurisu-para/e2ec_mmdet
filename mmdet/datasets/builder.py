@@ -3,6 +3,7 @@ import copy
 import platform
 import random
 import warnings
+import functools
 from functools import partial
 
 from collections.abc import Mapping, Sequence
@@ -153,11 +154,9 @@ def collate(batch, samples_per_gpu=1):
     else:
         return default_collate(batch)
 
-
 def main_collate(batch, samples_per_gpu=1):
     mybatch = [b['data_input'] for b in batch]
     mybatch = collate_batch(mybatch)
-    # mybatch = DataContainer(mybatch)
     purebatch = []
     for b in batch:
         b.pop('data_input')
@@ -323,7 +322,7 @@ def build_dataloader(dataset,
         sampler=sampler,
         num_workers=num_workers,
         batch_sampler=batch_sampler,
-        collate_fn=partial(main_collate, samples_per_gpu=samples_per_gpu),
+        collate_fn=partial(main_collate, samples_per_gpu=samples_per_gpu), # main_collate for e2ec
         pin_memory=False,
         worker_init_fn=init_fn,
         **kwargs)

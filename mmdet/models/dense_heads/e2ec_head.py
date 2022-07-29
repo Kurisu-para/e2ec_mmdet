@@ -114,6 +114,7 @@ class Snake(nn.Module):
         return x
 
 def collect_training(poly, ct_01):
+    ct_01 = ct_01.bool()
     batch_size = ct_01.size(0)
     poly = torch.cat([poly[i][ct_01[i]] for i in range(batch_size)], dim=0)
     return poly
@@ -391,7 +392,7 @@ class Decode(torch.nn.Module):
 
         ct_img_idx = data_input['ct_img_idx'][ct_01]
         _, _, height, width = data_input['ct_hm'].size()  # 128,128
-        ct_x, ct_y = ct_ind % width, ct_ind // width
+        ct_x, ct_y = ct_ind % width, torch.div(ct_ind, width, rounding_mode="floor")
 
         if ct_x.size(0) == 0:
             ct_offset = wh_pred[ct_img_idx, :, ct_y, ct_x].view(ct_x.size(0), 1, 2)
@@ -467,8 +468,6 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
                  evole_ietr_num=3,
                  evolve_stride=1,
                  loss_center_heatmap=dict(type='GaussianFocalLoss', loss_weight=1.0),
-                 loss_wh=dict(type='L1Loss', loss_weight=0.1),
-                 loss_offset=dict(type='L1Loss', loss_weight=1.0),
                  loss_init=dict(type='SmoothL1Loss', loss_weight=0.1),
                  loss_coarse=dict(type='SmoothL1Loss', loss_weight=0.1),
                  loss_iter1=dict(type='SmoothL1Loss', loss_weight=1.0),
@@ -485,20 +484,18 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
         self.min_ct_score = min_ct_score
         self.evole_ietr_num = evole_ietr_num
         self.evolve_stride = evolve_stride
-        self.heatmap_head = self._build_head(in_channel, feat_channel,
-                                             num_classes)
+        self.heatmap_head = self._build_head(in_channel, feat_channel, num_classes)
         self.wh_head = self._build_head(in_channel, feat_channel, 2 * points_per_poly)
-        self.offset_head = self._build_head(in_channel, feat_channel, 2)
 
         self.loss_center_heatmap = build_loss(loss_center_heatmap)
-        self.loss_wh = build_loss(loss_wh)
-        self.loss_offset = build_loss(loss_offset)
         self.loss_init = build_loss(loss_init)
         self.loss_coarse = build_loss(loss_coarse)
         self.loss_iter1 = build_loss(loss_iter1)
         self.loss_iter2 = build_loss(loss_iter2)
 
         self.cfg = cfg
+
+        self.test_stage = self.cfg.test.test_stage #'final-dml'
 
         self.train_decoder = Decode(num_point=self.cfg.commen.points_per_poly, init_stride=self.cfg.model.init_stride,
                                     coarse_stride=self.cfg.model.coarse_stride, down_sample=self.cfg.commen.down_ratio,
@@ -522,7 +519,7 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
         """Initialize weights of the head."""
         bias_init = bias_init_with_prob(0.1)
         self.heatmap_head[-1].bias.data.fill_(bias_init)
-        for head in [self.wh_head, self.offset_head]:
+        for head in [self.wh_head]:
             for m in head.modules():
                 if isinstance(m, nn.Conv2d):
                     normal_init(m, std=0.001)
@@ -544,10 +541,9 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
             cnn_features (List[Tensor])
         """
         outs = multi_apply(self.forward_single, feats)
-        center_heatmap_preds, wh_preds, offset_preds, cnn_features = outs
+        center_heatmap_preds, wh_preds, cnn_features = outs
         center_heatmap_preds = torch.stack(center_heatmap_preds, 0)
         wh_preds = torch.stack(wh_preds, 0)
-        offset_preds = torch.stack(offset_preds, 0)
         cnn_features = torch.stack(cnn_features, 0)
 
         output = {}
@@ -565,7 +561,45 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
                 self.train_decoder(data_input, cnn_features, output, is_training=False, ignore_gloabal_deform=ignore)
         output = self.gcn(output, cnn_features, data_input, test_stage=self.cfg.test.test_stage) #output已经更新了poly_init和poly_coarse 图网络
 
-        return (center_heatmap_preds, wh_preds, offset_preds, cnn_features, output)
+        return (cnn_features, output)
+
+    def test_pipe(self, feats):
+        """Forward features. Notice CenterNet head does not use FPN.
+
+        Args:
+            feats (tuple[Tensor]): Features from the upstream network, each is
+                a 4D-tensor.
+
+        Returns:
+            center_heatmap_preds (List[Tensor]): center predict heatmaps for
+                all levels, the channels number is num_classes.
+            wh_preds (List[Tensor]): wh predicts for all levels, the channels
+                number is 2.
+            offset_preds (List[Tensor]): offset predicts for all levels, the
+               channels number is 2.
+            cnn_features (List[Tensor])
+        """
+        outs = multi_apply(self.forward_single, feats)
+        center_heatmap_preds, wh_preds, cnn_features = outs
+        center_heatmap_preds = torch.stack(center_heatmap_preds, 0)
+        wh_preds = torch.stack(wh_preds, 0)
+        cnn_features = torch.stack(cnn_features, 0)
+
+        output = {}
+        output['ct_hm'] = center_heatmap_preds
+        output['wh'] = wh_preds
+
+        data_input = None # 空数据走test
+
+        with torch.no_grad(): #测试阶段不需要梯度
+            if self.test_stage == 'init':
+                ignore = True
+            else:
+                ignore = False
+            self.train_decoder(data_input, cnn_features, output, is_training=False, ignore_gloabal_deform=ignore)
+        output = self.gcn(output, cnn_features, data_input, test_stage=self.cfg.test.test_stage) #output已经更新了poly_init和poly_coarse 图网络
+
+        return output
 
     def forward_single(self, feat):
         """Forward feature of a single level.
@@ -581,16 +615,12 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
         """
         center_heatmap_pred = self.heatmap_head(feat).sigmoid()
         wh_pred = self.wh_head(feat)
-        offset_pred = self.offset_head(feat)
         cnn_feature = feat
 
-        return center_heatmap_pred, wh_pred, offset_pred, cnn_feature
+        return center_heatmap_pred, wh_pred, cnn_feature
 
-    @force_fp32(apply_to=('center_heatmap_preds', 'wh_preds', 'offset_preds', 'cnn_features'))
+    @force_fp32(apply_to=('center_heatmap_preds', 'cnn_features'))
     def loss(self,
-             center_heatmap_preds,
-             wh_preds,
-             offset_preds,
              cnn_features,
              output,
              gt_bboxes,
@@ -623,35 +653,15 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
                 - loss_offset (Tensor): loss of offset heatmap.
         """
 
-        assert len(center_heatmap_preds) == len(wh_preds) == len(
-            offset_preds)
-
-        target_result, avg_factor = self.get_targets(gt_bboxes, gt_labels,
-                                                     center_heatmap_preds.shape,
-                                                     img_metas[0]['pad_shape'])
-
-        center_heatmap_target = target_result['center_heatmap_target']
-        wh_target = target_result['wh_target']
-        offset_target = target_result['offset_target']
-        wh_offset_target_weight = target_result['wh_offset_target_weight']
+        center_heatmap_target = data_input['ct_hm']
+        avg_factor = max(1, center_heatmap_target.eq(1).sum())
 
         keyPointsMask = data_input['keypoints_mask'][data_input['ct_01']]
-
 
         # Since the channel of wh_target and offset_target is 2, the avg_factor
         # of loss_center_heatmap is always 1/2 of loss_wh and loss_offset.
         loss_center_heatmap = self.loss_center_heatmap(
-            center_heatmap_preds, center_heatmap_target, avg_factor=avg_factor)
-        # loss_wh = self.loss_wh(
-        #     wh_preds,
-        #     wh_target,
-        #     wh_offset_target_weight,
-        #     avg_factor=avg_factor * 2)
-        # loss_offset = self.loss_offset(
-        #     offset_preds,
-        #     offset_target,
-        #     wh_offset_target_weight,
-        #     avg_factor=avg_factor * 2)
+            output['ct_hm'], center_heatmap_target, avg_factor=avg_factor)
         loss_init = self.loss_init(
             output['poly_init'],
             output['img_gt_polys'],
@@ -677,8 +687,6 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
 
         return dict(
             loss_center_heatmap=loss_center_heatmap,
-            # loss_wh=loss_wh,
-            # loss_offset=loss_offset,
             loss_init=loss_init,
             loss_coarse=loss_coarse,
             loss_iter10=loss_iter10,
@@ -758,10 +766,6 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
 
         center_heatmap_target = gt_bboxes[-1].new_zeros(
             [bs, self.num_classes, feat_h, feat_w])
-        wh_target = gt_bboxes[-1].new_zeros([bs, 2, feat_h, feat_w])
-        offset_target = gt_bboxes[-1].new_zeros([bs, 2, feat_h, feat_w])
-        wh_offset_target_weight = gt_bboxes[-1].new_zeros(
-            [bs, 2, feat_h, feat_w])
 
         for batch_id in range(bs):
             gt_bbox = gt_bboxes[batch_id]
@@ -782,20 +786,8 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
                 gen_gaussian_target(center_heatmap_target[batch_id, ind],
                                     [ctx_int, cty_int], radius)
 
-                wh_target[batch_id, 0, cty_int, ctx_int] = scale_box_w
-                wh_target[batch_id, 1, cty_int, ctx_int] = scale_box_h
-
-                offset_target[batch_id, 0, cty_int, ctx_int] = ctx - ctx_int
-                offset_target[batch_id, 1, cty_int, ctx_int] = cty - cty_int
-
-                wh_offset_target_weight[batch_id, :, cty_int, ctx_int] = 1
-
         avg_factor = max(1, center_heatmap_target.eq(1).sum())
-        target_result = dict(
-            center_heatmap_target=center_heatmap_target,
-            wh_target=wh_target,
-            offset_target=offset_target,
-            wh_offset_target_weight=wh_offset_target_weight)
+        target_result = dict(center_heatmap_target=center_heatmap_target)
         return target_result, avg_factor
 
     @force_fp32(apply_to=('center_heatmap_preds', 'wh_preds', 'offset_preds'))
@@ -952,8 +944,7 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
     def _bboxes_nms(self, bboxes, labels, cfg):
         if labels.numel() > 0:
             max_num = cfg.max_per_img
-            bboxes, keep = batched_nms(bboxes[:, :4], bboxes[:,
-                                                             -1].contiguous(),
+            bboxes, keep = batched_nms(bboxes[:, :4], bboxes[:, -1].contiguous(),
                                        labels, cfg.nms)
             if max_num > 0:
                 bboxes = bboxes[:max_num]

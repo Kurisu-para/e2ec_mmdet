@@ -1,33 +1,32 @@
 _base_ = [
     '../_base_/datasets/coco_detection.py',
-    '../_base_/schedules/schedule_1x.py',
-    '../_base_/default_runtime.py'
+    '../_base_/schedules/schedule_1x.py', '../_base_/default_runtime.py'
 ]
+
 model = dict(
-    type='E2EC',
+    type='CenterNet',
     backbone=dict(
-        type='ResNet',
+        type='ResNet', #mmdetection/mmdet/models/backbones/resnet.py
         depth=18,
         norm_eval=False,
         norm_cfg=dict(type='BN'),
         init_cfg=dict(type='Pretrained', checkpoint='torchvision://resnet18')),
     neck=dict(
-        type='CTResNetNeck',
-        in_channel=512,
-        num_deconv_filters=(256, 128, 64),
+        type='CTResNetNeck', #mmdetection/mmdet/models/necks/ct_resnet_neck.py
+        in_channel=512, # [256,512,1024,2048]选一个
+        num_deconv_filters=(256, 128, 64), # 通道数
         num_deconv_kernels=(4, 4, 4),
         use_dcn=True),
     bbox_head=dict(
-        type='E2ECHead',
+        type='CenterNetHead', # mmdetection/mmdet/models/dense_heads/centernet_head.py
         num_classes=80,
         in_channel=64,
         feat_channel=64,
         loss_center_heatmap=dict(type='GaussianFocalLoss', loss_weight=1.0),
-        loss_init=dict(type='SmoothL1Loss', loss_weight=0.1),
-        loss_coarse=dict(type='SmoothL1Loss', loss_weight=0.1),
-        loss_iter1=dict(type='SmoothL1Loss', loss_weight=1.0),
-        loss_iter2=dict(type='DMLoss', loss_weight=1.0))
-)
+        loss_wh=dict(type='L1Loss', loss_weight=0.1),
+        loss_offset=dict(type='L1Loss', loss_weight=1.0)),
+    train_cfg=None,
+    test_cfg=dict(topk=100, local_maximum_kernel=3, max_per_img=100))
 
 # We fixed the incorrect img_norm_cfg problem in the source code.
 img_norm_cfg = dict(
@@ -50,54 +49,73 @@ train_pipeline = [
         std=[1, 1, 1],
         to_rgb=True,
         test_pad_mode=None),
-    dict(type='LoadAnnotations', with_bbox=False, with_label=False, with_mask=True, poly2mask=False),
     dict(type='Resize', img_scale=(512, 512), keep_ratio=True),
     dict(type='RandomFlip', flip_ratio=0.5),
     dict(type='Normalize', **img_norm_cfg),
-    dict(type='SegRescale', scale_factor=1 / 8),
     dict(type='DefaultFormatBundle'),
-    dict(type='Collect', keys=['img', 'gt_bboxes', 'gt_masks', 'gt_labels', 'data_input'])
+    dict(type='Collect', keys=['img', 'gt_bboxes', 'gt_labels'])
 ]
-
 test_pipeline = [
     dict(type='LoadImageFromFile', to_float32=True),
-    dict(type='LoadAnnotations', with_bbox=True),
-    dict(type='LoadAnnotations', with_bbox=False, with_label=False, with_mask=True, poly2mask=False),
-    dict(type='Resize', img_scale=(512, 512), keep_ratio=True),
-    dict(type='RandomFlip', flip_ratio=0.5),
-    dict(type='Normalize', **img_norm_cfg),
-    dict(type='DefaultFormatBundle'),
-    dict(type='Collect', keys=['img', 'data_input'])
+    dict(
+        type='MultiScaleFlipAug',
+        scale_factor=1.0,
+        flip=False,
+        transforms=[
+            dict(type='Resize', keep_ratio=True),
+            dict(
+                type='RandomCenterCropPad',
+                ratios=None,
+                border=None,
+                mean=[0, 0, 0],
+                std=[1, 1, 1],
+                to_rgb=True,
+                test_mode=True,
+                test_pad_mode=['logical_or', 31],
+                test_pad_add_pix=1),
+            dict(type='RandomFlip'),
+            dict(type='Normalize', **img_norm_cfg),
+            dict(type='DefaultFormatBundle'),
+            dict(
+                type='Collect',
+                meta_keys=('filename', 'ori_shape', 'img_shape', 'pad_shape',
+                           'scale_factor', 'flip', 'flip_direction',
+                           'img_norm_cfg', 'border'),
+                keys=['img'])
+        ])
 ]
 
 dataset_type = 'CocoDataset'
-data_root = '/home/sjtu/scratch/tongzhao/e2ec/data/coco/'
+# data_root = 'data/coco/'
+data_root = '/home/sjtu/scratch/tongzhao/minicoco/'
+
 
 # Use RepeatDataset to speed up training
 data = dict(
-    samples_per_gpu=24,
+    samples_per_gpu=16,
     workers_per_gpu=4,
     train=dict(
-        pipeline=train_pipeline,
         _delete_=True,
         type='RepeatDataset',
         times=5,
         dataset=dict(
             type=dataset_type,
-            ann_file=data_root + 'annotations/instances_train2017.json',
-            img_prefix=data_root + 'train2017/',
+            ann_file=data_root + 'mini_instances_train2017.json',
+            img_prefix=data_root + 'mini_train2017/',
             pipeline=train_pipeline)),
     val=dict(
             type=dataset_type,
-            ann_file=data_root + 'annotations/instances_val2017.json',
-            img_prefix=data_root + 'val2017/',
+            ann_file=data_root + 'mini_instances_val2017.json',
+            img_prefix=data_root + 'mini_val2017/',
             pipeline=test_pipeline),
     test=dict(
             type=dataset_type,
-            ann_file=data_root + 'annotations/instances_val2017.json',
-            img_prefix=data_root + 'val2017/',
+            ann_file=data_root + 'mini_instances_val2017.json',
+            img_prefix=data_root + 'mini_val2017/',
             pipeline=test_pipeline))
-evaluation = dict(interval=1, metric='bbox')
+
+# 'mini_instances_val2017.json'
+# 'mini_val2017/'
 
 # optimizer
 # Based on the default settings of modern detectors, the SGD effect is better
@@ -115,8 +133,6 @@ lr_config = dict(
     warmup_ratio=1.0 / 1000,
     step=[18, 24])  # the real step is [18*5, 24*5]
 # workflow = [('val', 1), ('train', 1)]
-workflow = [('train', 1), ('val', 1)]
 # workflow = [('train', 1)]
-runner = dict(max_epochs=28)  # the real epoch is 28*5=140
-# # running setting
-# total_epochs = 140
+# runner = dict(max_epochs=28)  # the real epoch is 28*5=140
+runner = dict(max_epochs=5)  # the real epoch is 28*5=140

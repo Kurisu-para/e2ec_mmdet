@@ -275,9 +275,12 @@ class CenterNetHead(BaseDenseHead, BBoxTestMixin):
         for img_id in range(len(img_metas)):
             result_list.append(
                 self._get_bboxes_single(
-                    center_heatmap_preds[0][img_id:img_id + 1, ...],
-                    wh_preds[0][img_id:img_id + 1, ...],
-                    offset_preds[0][img_id:img_id + 1, ...],
+                    # center_heatmap_preds[0][img_id:img_id + 1, ...],
+                    # wh_preds[0][img_id:img_id + 1, ...],
+                    # offset_preds[0][img_id:img_id + 1, ...],
+                    torch.unsqueeze(center_heatmap_preds[img_id], 0),
+                    torch.unsqueeze(wh_preds[img_id], 0),
+                    torch.unsqueeze(offset_preds[img_id], 0),
                     img_metas[img_id],
                     rescale=rescale,
                     with_nms=with_nms))
