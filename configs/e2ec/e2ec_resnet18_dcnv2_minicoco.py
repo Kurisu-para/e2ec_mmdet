@@ -61,13 +61,13 @@ train_pipeline = [
 
 test_pipeline = [
     dict(type='LoadImageFromFile', to_float32=True),
-    dict(type='LoadAnnotations', with_bbox=True),
-    dict(type='LoadAnnotations', with_bbox=False, with_label=False, with_mask=True, poly2mask=False),
-    dict(type='Resize', img_scale=(512, 512), keep_ratio=True),
-    dict(type='RandomFlip', flip_ratio=0.5),
-    dict(type='Normalize', **img_norm_cfg),
+    # dict(type='Resize', img_scale=(512, 512), keep_ratio=True),
+    # dict(type='RandomFlip', flip_ratio=0.5),
+    # dict(type='Normalize', **img_norm_cfg),
     dict(type='DefaultFormatBundle'),
-    dict(type='Collect', keys=['img', 'data_input'])
+    dict(type='Collect',
+         meta_keys=('filename', 'ori_shape', 'img_shape', 'pad_shape'),
+         keys=['img'])
 ]
 
 dataset_type = 'CocoDataset'
@@ -79,15 +79,10 @@ data = dict(
     samples_per_gpu=24,
     workers_per_gpu=4,
     train=dict(
-        pipeline=train_pipeline,
-        _delete_=True,
-        type='RepeatDataset',
-        times=5,
-        dataset=dict(
             type=dataset_type,
             ann_file=data_root + 'mini_instances_train2017.json',
             img_prefix=data_root + 'mini_train2017/',
-            pipeline=train_pipeline)),
+            pipeline=train_pipeline),
     val=dict(
             type=dataset_type,
             ann_file=data_root + 'mini_instances_val2017.json',
@@ -104,9 +99,22 @@ evaluation = dict(interval=1, metric='bbox')
 # Based on the default settings of modern detectors, the SGD effect is better
 # than the Adam in the source code, so we use SGD default settings and
 # if you use adam+lr5e-4, the map is 29.1.
+
+# optimizer = dict(type='SGD', lr=0.02, momentum=0.9, weight_decay=0.0001)
+# optimizer_config = dict(grad_clip=None)
+# # learning policy
+# lr_config = dict(
+#     policy='step',
+#     warmup='linear',
+#     warmup_iters=500,
+#     warmup_ratio=0.001,
+#     step=[8, 11])
+# runner = dict(type='EpochBasedRunner', max_epochs=12)
+
+# optimizer = dict(type='AdamW', lr=1e-4)
+optimizer = dict(_delete_=True, type='Adam', lr=1e-4, weight_decay=5e-4)
 optimizer_config = dict(
     _delete_=True, grad_clip=dict(max_norm=35, norm_type=2))
-
 # learning policy
 # Based on the default settings of modern detectors, we added warmup settings.
 lr_config = dict(
@@ -118,6 +126,4 @@ lr_config = dict(
 # workflow = [('val', 1), ('train', 1)]
 workflow = [('train', 1), ('val', 1)]
 # workflow = [('train', 1)]
-runner = dict(max_epochs=28)  # the real epoch is 28*5=140
-# # running setting
-# total_epochs = 140
+runner = dict(max_epochs=140)

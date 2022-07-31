@@ -155,15 +155,18 @@ def collate(batch, samples_per_gpu=1):
         return default_collate(batch)
 
 def main_collate(batch, samples_per_gpu=1):
-    mybatch = [b['data_input'] for b in batch]
-    mybatch = collate_batch(mybatch)
-    purebatch = []
-    for b in batch:
-        b.pop('data_input')
-        purebatch.append(b)
+    if 'data_input' in batch[0]:
+        mybatch = [b['data_input'] for b in batch]
+        mybatch = collate_batch(mybatch)
+        purebatch = []
+        for b in batch:
+            b.pop('data_input')
+            purebatch.append(b)
 
-    out = collate(purebatch, samples_per_gpu=samples_per_gpu)
-    out['data_input'] = mybatch
+        out = collate(purebatch, samples_per_gpu=samples_per_gpu)
+        out['data_input'] = mybatch
+    else:
+        out = collate(batch, samples_per_gpu=samples_per_gpu)
 
     return out
 

@@ -550,15 +550,7 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
         output['ct_hm'] = center_heatmap_preds
         output['wh'] = wh_preds
 
-        if 'test' not in data_input['meta']:
-            self.train_decoder(data_input, cnn_features, output, is_training=True)
-        else:
-            with torch.no_grad(): #测试阶段不需要梯度
-                if self.test_stage == 'init':
-                    ignore = True
-                else:
-                    ignore = False
-                self.train_decoder(data_input, cnn_features, output, is_training=False, ignore_gloabal_deform=ignore)
+        self.train_decoder(data_input, cnn_features, output, is_training=True)
         output = self.gcn(output, cnn_features, data_input, test_stage=self.cfg.test.test_stage) #output已经更新了poly_init和poly_coarse 图网络
 
         return (cnn_features, output)

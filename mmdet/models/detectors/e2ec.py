@@ -127,7 +127,7 @@ class E2EC(SingleStageDetector):
                                                   gt_labels, data_input, gt_bboxes_ignore)
             return losses
 
-    def det_eval(self, output, batch):
+    def det_eval(self, img, img_metas, output):
         detection = output['detection']
         detection = detection[0] if detection.dim() == 3 else detection
         score = detection[:, 2].detach().cpu().numpy()
@@ -138,14 +138,36 @@ class E2EC(SingleStageDetector):
         box = torch.cat([torch.min(py, dim=1, keepdim=True)[0], torch.max(py, dim=1, keepdim=True)[0]], dim=1)
         box = box.cpu().numpy()
 
-        center = batch['meta']['center'][0].detach().cpu().numpy()
-        scale = batch['meta']['scale'][0].detach().cpu().numpy()
+        height, width, _ = img_metas['ori_shape']
+        center = np.array([width / 2., height / 2.], dtype=np.float32)
+        scale = None #coco
+        test_scale = None
+        test_rescale = None
+
+        scale = np.array([width, height])
+        x = 32
+        if test_rescale is not None:
+            input_w, input_h = int((width / test_rescale + x - 1) // x * x), \
+                               int((height / test_rescale + x - 1) // x * x)
+        else:
+            if test_scale is None:
+                input_w = (int(width / 1.) | (x - 1)) + 1
+                input_h = (int(height / 1.) | (x - 1)) + 1
+            else:
+                scale = max(width, height) * 1.0
+                scale = np.array([scale, scale])
+                input_w, input_h = test_scale
+        center = np.array([width // 2, height // 2])
+
+        center = torch.tensor(center)
+        scale = torch.tensor(scale)
+        center = center.detach().cpu().numpy()
+        scale = scale.detach().cpu().numpy()
 
         if len(box) == 0:
             return
 
-        h, w = batch['inp'].size(2), batch['inp'].size(3)
-        trans_output_inv = get_affine_transform(center, scale, 0, [w, h], inv=1)
+        trans_output_inv = get_affine_transform(center, scale, 0, [input_w, input_h], inv=1)
 
         det_bboxes = []
         for i in range(len(label)):
@@ -244,7 +266,7 @@ class E2EC(SingleStageDetector):
         ]
         return bbox_results
 
-    def simple_test(self, img, img_metas, data_input, rescale=False):
+    def simple_test(self, img, img_metas, rescale=False):
         """Test function without test-time augmentation.
 
         Args:
@@ -260,14 +282,14 @@ class E2EC(SingleStageDetector):
         """
         feat = self.extract_feat(img)
         output = self.bbox_head.test_pipe(feat)
-        results_list = self.det_eval(output, data_input)
+        results_list = self.det_eval(img, img_metas, output)
         bbox_results = [
             bbox2result(det_bboxes, det_labels, self.bbox_head.num_classes)
             for det_bboxes, det_labels in results_list
         ]
         return bbox_results
 
-    def forward_test(self, imgs, img_metas, data_input, **kwargs):
+    def forward_test(self, imgs, img_metas, **kwargs):
         """
         Args:
             imgs (List[Tensor]): the outer list indicates test-time
@@ -289,7 +311,7 @@ class E2EC(SingleStageDetector):
         if num_augs == 1:
             img_metas[0]['batch_input_shape'] = tuple(imgs.shape[-2:])
 
-            return self.simple_test(imgs, img_metas[0], data_input, **kwargs)
+            return self.simple_test(imgs, img_metas[0], **kwargs)
         else:
             # TODO: support test-time augmentation
             assert NotImplementedError
