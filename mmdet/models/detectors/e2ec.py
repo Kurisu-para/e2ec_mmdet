@@ -180,6 +180,8 @@ class E2EC(SingleStageDetector):
         det_bboxes = torch.tensor(det_bboxes)
         det_labels = torch.tensor(label)
 
+        # det_bboxes, det_labels = self.bbox_head._bboxes_nms(det_bboxes, det_labels, self.test_cfg)
+
         return [(det_bboxes, det_labels)]
 
     def merge_aug_results(self, aug_results, with_nms):

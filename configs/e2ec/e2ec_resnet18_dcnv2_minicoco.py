@@ -33,30 +33,42 @@ model = dict(
 img_norm_cfg = dict(
     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
 
+# train_pipeline = [
+#     dict(type='LoadImageFromFile', to_float32=True, color_type='color'),
+#     dict(type='LoadAnnotations', with_bbox=True),
+#     dict(
+#         type='PhotoMetricDistortion',
+#         brightness_delta=32,
+#         contrast_range=(0.5, 1.5),
+#         saturation_range=(0.5, 1.5),
+#         hue_delta=18),
+#     dict(
+#         type='RandomCenterCropPad',
+#         crop_size=(512, 512),
+#         ratios=(0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3),
+#         mean=[0, 0, 0],
+#         std=[1, 1, 1],
+#         to_rgb=True,
+#         test_pad_mode=None),
+#     dict(type='LoadAnnotations', with_bbox=False, with_label=False, with_mask=True, poly2mask=False),
+#     dict(type='Resize', img_scale=(512, 512), keep_ratio=True),
+#     dict(type='RandomFlip', flip_ratio=0.5),
+#     dict(type='Normalize', **img_norm_cfg),
+#     dict(type='SegRescale', scale_factor=1 / 8),
+#     dict(type='DefaultFormatBundle'),
+#     dict(type='Collect', keys=['img', 'gt_bboxes', 'gt_masks', 'gt_labels', 'data_input'])
+# ]
+
 train_pipeline = [
     dict(type='LoadImageFromFile', to_float32=True, color_type='color'),
-    dict(type='LoadAnnotations', with_bbox=True),
-    dict(
-        type='PhotoMetricDistortion',
-        brightness_delta=32,
-        contrast_range=(0.5, 1.5),
-        saturation_range=(0.5, 1.5),
-        hue_delta=18),
-    dict(
-        type='RandomCenterCropPad',
-        crop_size=(512, 512),
-        ratios=(0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3),
-        mean=[0, 0, 0],
-        std=[1, 1, 1],
-        to_rgb=True,
-        test_pad_mode=None),
-    dict(type='LoadAnnotations', with_bbox=False, with_label=False, with_mask=True, poly2mask=False),
-    dict(type='Resize', img_scale=(512, 512), keep_ratio=True),
-    dict(type='RandomFlip', flip_ratio=0.5),
-    dict(type='Normalize', **img_norm_cfg),
-    dict(type='SegRescale', scale_factor=1 / 8),
+    dict(type='LoadAnnotations', with_bbox=True, with_label=True, with_mask=True, poly2mask=False),
+    # dict(type='Resize', img_scale=(512, 512), keep_ratio=True),
+    # dict(type='RandomFlip', flip_ratio=0.5),
+    # dict(type='Normalize', **img_norm_cfg),
     dict(type='DefaultFormatBundle'),
-    dict(type='Collect', keys=['img', 'gt_bboxes', 'gt_masks', 'gt_labels', 'data_input'])
+    dict(type='Collect', keys=['img', 'gt_bboxes', 'gt_masks', 'gt_labels', 'data_input'],
+         meta_keys=('filename', 'ori_filename', 'ori_shape', 'img_shape')
+         )
 ]
 
 test_pipeline = [
@@ -117,12 +129,12 @@ optimizer_config = dict(
     _delete_=True, grad_clip=dict(max_norm=35, norm_type=2))
 # learning policy
 # Based on the default settings of modern detectors, we added warmup settings.
-lr_config = dict(
-    policy='step',
-    warmup='linear',
-    warmup_iters=1000,
-    warmup_ratio=1.0 / 1000,
-    step=[18, 24])  # the real step is [18*5, 24*5]
+# lr_config = dict(
+#     policy='step',
+#     warmup='linear',
+#     warmup_iters=1000,
+#     warmup_ratio=1.0 / 1000,
+#     step=[18, 24])  # the real step is [18*5, 24*5]
 # workflow = [('val', 1), ('train', 1)]
 workflow = [('train', 1), ('val', 1)]
 # workflow = [('train', 1)]

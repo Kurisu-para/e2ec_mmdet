@@ -825,6 +825,7 @@ class LoadAnnotations:
                 [self.process_polygons(polygons) for polygons in gt_masks], h, w) # 处理后可得一张图片有多少多边形，但每个多边形所属的类丢失了
 
             img = results['img']
+            assert img.shape[1] == w and img.shape[0] == h
             width, height = img.shape[1], img.shape[0]
 
             instance_polys = [[np.array(poly).reshape(-1, 2) for poly in instance] for instance in gt_contour_masks]
@@ -877,7 +878,7 @@ class LoadAnnotations:
             data_input.update(evolution)
             data_input.update({'keypoints_mask': keyPointsMask})
             ct_num = len(ct_ind)
-            meta = {'center': center, 'scale': scale, 'img_id': image_id, 'ann': image_id, 'ct_num': ct_num}
+            meta = {'center': center, 'scale': scale, 'img_id': image_id, 'ann': image_id, 'ct_num': ct_num} # ann
             data_input.update({'meta': meta})
 
         results['data_input'] = data_input

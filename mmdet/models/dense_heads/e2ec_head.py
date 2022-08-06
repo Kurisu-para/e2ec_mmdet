@@ -293,8 +293,7 @@ def topk(scores, K=100):
     topk_xs = (topk_inds % width).int().float()
     topk_score, topk_ind = torch.topk(topk_scores.view(batch, -1), K)
     topk_clses = (topk_ind / K).int()
-    topk_inds = gather_feat(
-        topk_inds.view(batch, -1, 1), topk_ind).view(batch, K)
+    topk_inds = gather_feat(topk_inds.view(batch, -1, 1), topk_ind).view(batch, K)
     topk_ys = gather_feat(topk_ys.view(batch, -1, 1), topk_ind).view(batch, K)
     topk_xs = gather_feat(topk_xs.view(batch, -1, 1), topk_ind).view(batch, K)
     return topk_score, topk_inds, topk_clses, topk_ys, topk_xs
