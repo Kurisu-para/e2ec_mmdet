@@ -1,19 +1,15 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import torch
-
 from mmdet.core import bbox2result
 from mmdet.models.builder import DETECTORS
 from ...core.utils import flip_tensor
 from .single_stage import SingleStageDetector
-
-import os
-import json
-import pycocotools.coco as coco
-from pycocotools.cocoeval import COCOeval
 import pycocotools.mask as mask_utils
 import numpy as np
 import cv2
-
+import random
+from shapely.geometry import Polygon
+from args import coco as cfg
 
 def coco_poly_to_rle(poly, h, w):
     rle_ = []
@@ -94,6 +90,8 @@ class E2EC(SingleStageDetector):
         super(E2EC, self).__init__(backbone, neck, bbox_head, train_cfg,
                                         test_cfg, pretrained, init_cfg)
 
+        self._cfg = cfg
+
     def forward_train(self,
                       img,
                       img_metas,
@@ -120,14 +118,12 @@ class E2EC(SingleStageDetector):
             Returns:
                 dict[str, Tensor]: A dictionary of loss components.
             """
-            super(SingleStageDetector, self).forward_train(img, img_metas)
-            x = self.extract_feat(img)
-
+            x = self.extract_feat(data_input['inp'])
             losses = self.bbox_head.forward_train(x, img_metas, gt_bboxes, gt_masks,
                                                   gt_labels, data_input, gt_bboxes_ignore)
             return losses
 
-    def det_eval(self, img, img_metas, output):
+    def det_eval(self, meta, output):
         detection = output['detection']
         detection = detection[0] if detection.dim() == 3 else detection
         score = detection[:, 2].detach().cpu().numpy()
@@ -138,36 +134,14 @@ class E2EC(SingleStageDetector):
         box = torch.cat([torch.min(py, dim=1, keepdim=True)[0], torch.max(py, dim=1, keepdim=True)[0]], dim=1)
         box = box.cpu().numpy()
 
-        height, width, _ = img_metas['ori_shape']
-        center = np.array([width / 2., height / 2.], dtype=np.float32)
-        scale = None #coco
-        test_scale = None
-        test_rescale = None
-
-        scale = np.array([width, height])
-        x = 32
-        if test_rescale is not None:
-            input_w, input_h = int((width / test_rescale + x - 1) // x * x), \
-                               int((height / test_rescale + x - 1) // x * x)
-        else:
-            if test_scale is None:
-                input_w = (int(width / 1.) | (x - 1)) + 1
-                input_h = (int(height / 1.) | (x - 1)) + 1
-            else:
-                scale = max(width, height) * 1.0
-                scale = np.array([scale, scale])
-                input_w, input_h = test_scale
-        center = np.array([width // 2, height // 2])
-
-        center = torch.tensor(center)
-        scale = torch.tensor(scale)
-        center = center.detach().cpu().numpy()
-        scale = scale.detach().cpu().numpy()
+        center = meta['center'][0].detach().cpu().numpy()
+        scale = meta['scale'][0].detach().cpu().numpy()
 
         if len(box) == 0:
             return
 
-        trans_output_inv = get_affine_transform(center, scale, 0, [input_w, input_h], inv=1)
+        b, c, h, w = meta['inp'].shape
+        trans_output_inv = get_affine_transform(center, scale, 0, [w, h], inv=1)
 
         det_bboxes = []
         for i in range(len(label)):
@@ -180,95 +154,9 @@ class E2EC(SingleStageDetector):
         det_bboxes = torch.tensor(det_bboxes)
         det_labels = torch.tensor(label)
 
-        # det_bboxes, det_labels = self.bbox_head._bboxes_nms(det_bboxes, det_labels, self.test_cfg)
-
         return [(det_bboxes, det_labels)]
 
-    def merge_aug_results(self, aug_results, with_nms):
-        """Merge augmented detection bboxes and score.
-
-        Args:
-            aug_results (list[list[Tensor]]): Det_bboxes and det_labels of each
-                image.
-            with_nms (bool): If True, do nms before return boxes.
-
-        Returns:
-            tuple: (out_bboxes, out_labels)
-        """
-        recovered_bboxes, aug_labels = [], []
-        for single_result in aug_results:
-            recovered_bboxes.append(single_result[0][0])
-            aug_labels.append(single_result[0][1])
-
-        bboxes = torch.cat(recovered_bboxes, dim=0).contiguous()
-        labels = torch.cat(aug_labels).contiguous()
-        if with_nms:
-            out_bboxes, out_labels = self.bbox_head._bboxes_nms(
-                bboxes, labels, self.bbox_head.test_cfg)
-        else:
-            out_bboxes, out_labels = bboxes, labels
-
-        return out_bboxes, out_labels
-
-    def aug_test(self, imgs, img_metas, rescale=True):
-        """Augment testing of CenterNet. Aug test must have flipped image pair,
-        and unlike CornerNet, it will perform an averaging operation on the
-        feature map instead of detecting bbox.
-
-        Args:
-            imgs (list[Tensor]): Augmented images.
-            img_metas (list[list[dict]]): Meta information of each image, e.g.,
-                image size, scaling factor, etc.
-            rescale (bool): If True, return boxes in original image space.
-                Default: True.
-
-        Note:
-            ``imgs`` must including flipped image pairs.
-
-        Returns:
-            list[list[np.ndarray]]: BBox results of each image and classes.
-                The outer list corresponds to each image. The inner list
-                corresponds to each class.
-        """
-        img_inds = list(range(len(imgs)))
-        assert img_metas[0][0]['flip'] + img_metas[1][0]['flip'], (
-            'aug test must have flipped image pair')
-        aug_results = []
-        for ind, flip_ind in zip(img_inds[0::2], img_inds[1::2]):
-            flip_direction = img_metas[flip_ind][0]['flip_direction']
-            img_pair = torch.cat([imgs[ind], imgs[flip_ind]])
-            x = self.extract_feat(img_pair)
-            center_heatmap_preds, wh_preds, offset_preds = self.bbox_head(x)
-            assert len(center_heatmap_preds) == len(wh_preds) == len(
-                offset_preds) == 1
-
-            # Feature map averaging
-            center_heatmap_preds[0] = (center_heatmap_preds[0][0:1] +
-                                       flip_tensor(center_heatmap_preds[0][1:2], flip_direction)) / 2
-            wh_preds[0] = (wh_preds[0][0:1] +
-                           flip_tensor(wh_preds[0][1:2], flip_direction)) / 2
-
-            bbox_list = self.bbox_head.get_bboxes(
-                center_heatmap_preds,
-                wh_preds, [offset_preds[0][0:1]],
-                img_metas[ind],
-                rescale=rescale,
-                with_nms=False)
-            aug_results.append(bbox_list)
-
-        nms_cfg = self.bbox_head.test_cfg.get('nms_cfg', None)
-        if nms_cfg is None:
-            with_nms = False
-        else:
-            with_nms = True
-        bbox_list = [self.merge_aug_results(aug_results, with_nms)]
-        bbox_results = [
-            bbox2result(det_bboxes, det_labels, self.bbox_head.num_classes)
-            for det_bboxes, det_labels in bbox_list
-        ]
-        return bbox_results
-
-    def simple_test(self, img, img_metas, rescale=False):
+    def simple_test(self, img, img_metas, meta, rescale=False):
         """Test function without test-time augmentation.
 
         Args:
@@ -284,14 +172,14 @@ class E2EC(SingleStageDetector):
         """
         feat = self.extract_feat(img)
         output = self.bbox_head.test_pipe(feat)
-        results_list = self.det_eval(img, img_metas, output)
+        results_list = self.det_eval(meta, output)
         bbox_results = [
             bbox2result(det_bboxes, det_labels, self.bbox_head.num_classes)
             for det_bboxes, det_labels in results_list
         ]
         return bbox_results
 
-    def forward_test(self, imgs, img_metas, **kwargs):
+    def forward_test(self, imgs, img_metas, meta, **kwargs):
         """
         Args:
             imgs (List[Tensor]): the outer list indicates test-time
@@ -313,7 +201,7 @@ class E2EC(SingleStageDetector):
         if num_augs == 1:
             img_metas[0]['batch_input_shape'] = tuple(imgs.shape[-2:])
 
-            return self.simple_test(imgs, img_metas[0], **kwargs)
+            return self.simple_test(imgs, img_metas[0], meta, **kwargs)
         else:
             # TODO: support test-time augmentation
             assert NotImplementedError
