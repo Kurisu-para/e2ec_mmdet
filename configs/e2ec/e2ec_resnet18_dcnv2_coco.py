@@ -31,7 +31,8 @@ model = dict(
 
 train_pipeline = [
     dict(type='LoadImageFromFile', to_float32=True, color_type='color'),
-    dict(type='LoadAnnotations', with_bbox=True, with_label=True, with_mask=True, poly2mask=False),
+    dict(type='LoadAnnotations', with_bbox=True, with_label=True, with_mask=True),
+    dict(type='Contour'),
     dict(type='DefaultFormatBundle'),
     dict(type='Collect', keys=['img', 'gt_bboxes', 'gt_masks', 'gt_labels', 'data_input'],
          meta_keys=('filename', 'ori_filename', 'ori_shape', 'img_shape')
@@ -73,16 +74,11 @@ evaluation = dict(interval=1, metric='bbox')
 optimizer = dict(_delete_=True, type='Adam', lr=1e-4, weight_decay=5e-4)
 optimizer_config = dict(
     _delete_=True, grad_clip=dict(max_norm=35, norm_type=2))
-# learning policy
-# Based on the default settings of modern detectors, we added warmup settings.
-# lr_config = dict(
-#     policy='step',
-#     warmup='linear',
-#     warmup_iters=1000,
-#     warmup_ratio=1.0 / 1000,
-#     step=[18, 24])  # the real step is [18*5, 24*5]
 
-# workflow = [('val', 1), ('train', 1)]
-workflow = [('train', 1), ('val', 1)]
-# workflow = [('train', 1)]
+lr_config = dict(
+    policy='step',
+    step=[80, 120],
+    gamma=0.5)
+
+workflow = [('train', 1)]
 runner = dict(max_epochs=140)

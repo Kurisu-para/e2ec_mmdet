@@ -7,10 +7,10 @@ from mmdet.datasets.pipelines import Compose
 from mmcv.parallel import collate, scatter
 import torch
 
-config_file = 'configs/e2ec/e2ec_resnet18_dcnv2_coco.py'
+config_file = 'configs/e2ec/e2ec_is_resnet18_dcnv2_coco.py'
 # download the checkpoint from model zoo and put it in `checkpoints/`
 # url: https://download.openmmlab.com/mmdetection/v2.0/faster_rcnn/faster_rcnn_r50_fpn_1x_coco/faster_rcnn_r50_fpn_1x_coco_20200130-047c8118.pth
-checkpoint_file = '/home/sjtu/scratch/tongzhao/e2ec_mmdetection/work_dirs/e2ec_resnet18_dcnv2_coco/epoch_8.pth'
+checkpoint_file = '/home/sjtu/scratch/tongzhao/e2ec_mmdetection/work_dirs/e2ec_is_resnet18_dcnv2_coco/latest.pth'
 
 # build the model from a config file and a checkpoint file
 model = init_detector(config_file, checkpoint_file, device='cuda:0')

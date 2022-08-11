@@ -1,7 +1,7 @@
 _base_ = [
-    '../_base_/datasets/coco_detection.py',
+    '../_base_/datasets/coco_instance.py',
     '../_base_/schedules/schedule_1x.py',
-    '../_base_/default_runtime.py'
+    '../_base_/default_runtime.py',
 ]
 model = dict(
     type='E2EC',
@@ -17,7 +17,7 @@ model = dict(
         num_deconv_filters=(256, 128, 64),
         num_deconv_kernels=(4, 4, 4),
         use_dcn=True),
-    bbox_head=dict(
+    mask_head=dict(
         type='E2ECHead',
         num_classes=80,
         in_channel=64,
@@ -68,7 +68,7 @@ data = dict(
             ann_file=data_root + 'mini_instances_val2017.json',
             img_prefix=data_root + 'mini_val2017/',
             pipeline=test_pipeline))
-evaluation = dict(interval=1, metric='bbox')
+evaluation = dict(interval=1, metric=['bbox', 'segm'])
 
 optimizer = dict(_delete_=True, type='Adam', lr=1e-4, weight_decay=5e-4)
 optimizer_config = dict(

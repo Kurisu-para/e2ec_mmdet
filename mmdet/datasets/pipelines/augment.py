@@ -157,7 +157,7 @@ def augment(img, split, _data_rng, _eig_val, _eig_vec, mean, std,
 
 @PIPELINES.register_module()
 class Augment:
-    def __init__(self, mode='train'):
+    def __init__(self, mode='test'):
         self._cfg = cfg
         self.mode = mode
 

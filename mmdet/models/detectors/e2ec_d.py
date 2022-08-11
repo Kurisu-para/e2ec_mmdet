@@ -2,10 +2,6 @@
 import torch
 from mmdet.core import bbox2result
 from mmdet.models.builder import DETECTORS
-
-from ..builder import DETECTORS
-from .single_stage_instance_seg import SingleStageInstanceSegmentor
-
 from ...core.utils import flip_tensor
 from .single_stage import SingleStageDetector
 import pycocotools.mask as mask_utils
@@ -78,55 +74,21 @@ def affine_transform(pt, t):
     new_pt = np.dot(np.array(pt), t[:, :2].T) + t[:, 2]
     return new_pt
 
-def polygons_to_mask(height, width, polygons):
-    mask = np.zeros((height, width), dtype=np.int32)
-    polygons = np.array(polygons, dtype=np.int32) # 这里必须是int32，其他类型使用fillPoly会报错
-    # shape = polygons.shape
-    # polygons = polygons.reshape(shape[0], -1, 2)
-    cv2.fillPoly(mask, [polygons], 1) # 非int32 会报错
-    return mask
-
-def mask2result(masks, labels, num_classes):
-    """Convert detection results to a list of numpy arrays.
-
-    Args:
-        masks (torch.Tensor | np.ndarray): shape (n, img_h, img_w)
-        labels (torch.Tensor | np.ndarray): shape (n, )
-        num_classes (int): class number, including background class
-
-    Returns:
-        list(ndarray): mask results of each class
-    """
-    if masks.shape[0] == 0:
-        return [np.zeros((0, 5), dtype=np.float32) for i in range(num_classes)]
-    else:
-        if isinstance(masks, torch.Tensor):
-            masks = masks.detach().cpu().numpy()
-            labels = labels.detach().cpu().numpy()
-        return [masks[labels == i, :] for i in range(num_classes)]
-
 @DETECTORS.register_module()
-class E2EC(SingleStageInstanceSegmentor):
+class E2EC(SingleStageDetector):
     """Implementation of E2EC
     """
+
     def __init__(self,
                  backbone,
-                 neck=None,
-                 bbox_head=None,
-                 mask_head=None,
+                 neck,
+                 bbox_head,
                  train_cfg=None,
                  test_cfg=None,
-                 init_cfg=None,
-                 pretrained=None):
-        super(E2EC, self).__init__(
-            backbone=backbone,
-            neck=neck,
-            bbox_head=bbox_head,
-            mask_head=mask_head,
-            train_cfg=train_cfg,
-            test_cfg=test_cfg,
-            init_cfg=init_cfg,
-            pretrained=pretrained)
+                 pretrained=None,
+                 init_cfg=None):
+        super(E2EC, self).__init__(backbone, neck, bbox_head, train_cfg,
+                                        test_cfg, pretrained, init_cfg)
 
         self._cfg = cfg
 
@@ -157,7 +119,7 @@ class E2EC(SingleStageInstanceSegmentor):
                 dict[str, Tensor]: A dictionary of loss components.
             """
             x = self.extract_feat(data_input['inp'])
-            losses = self.mask_head.forward_train(x, img_metas, gt_bboxes, gt_masks,
+            losses = self.bbox_head.forward_train(x, img_metas, gt_bboxes, gt_masks,
                                                   gt_labels, data_input, gt_bboxes_ignore)
             return losses
 
@@ -189,98 +151,33 @@ class E2EC(SingleStageInstanceSegmentor):
             box_.append(bscore)
             det_bboxes.append(box_)
 
-        det_bboxes = np.array(det_bboxes)
-        det_labels = label
+        det_bboxes = torch.tensor(det_bboxes)
+        det_labels = torch.tensor(label)
 
         return [(det_bboxes, det_labels)]
-
-    def seg_eval(self, meta, output, img_metas):
-        detection = output['detection']
-        score = detection[:, 2].detach().cpu().numpy()
-        label = detection[:, 3].detach().cpu().numpy().astype(int)
-        py = output['py'][-1].detach().cpu().numpy()
-
-        if len(py) == 0:
-            return
-
-        center = meta['center'][0].detach().cpu().numpy()
-        scale = meta['scale'][0].detach().cpu().numpy()
-
-        b, c, h, w = meta['inp'].shape
-        trans_output_inv = get_affine_transform(center, scale, 0, [w, h], inv=1)
-        ori_h, ori_w, ori_c = img_metas['ori_shape']
-        py = [affine_transform(py_, trans_output_inv) for py_ in py]
-        # rles = coco_poly_to_rle(py, ori_h, ori_w)
-        masks = [polygons_to_mask(ori_h, ori_w, p) for p in py]
-        seg_masks = np.array(masks)
-        seg_labels = label
-
-        return [(seg_masks, seg_labels)]
-
-    # def simple_test(self, img, img_metas, meta, rescale=False): #纯detection
-    #     """Test function without test-time augmentation.
-    #
-    #     Args:
-    #         img (torch.Tensor): Images with shape (N, C, H, W).
-    #         img_metas (list[dict]): List of image information.
-    #         rescale (bool, optional): Whether to rescale the results.
-    #             Defaults to False.
-    #
-    #     Returns:
-    #         list[list[np.ndarray]]: BBox results of each image and classes.
-    #             The outer list corresponds to each image. The inner list
-    #             corresponds to each class.
-    #     """
-    #     feat = self.extract_feat(img)
-    #     output = self.mask_head.test_pipe(feat)
-    #     results_list = self.det_eval(meta, output)
-    #     bbox_results = [
-    #         bbox2result(det_bboxes, det_labels, self.bbox_head.num_classes)
-    #         for det_bboxes, det_labels in results_list
-    #     ]
-    #     return bbox_results
 
     def simple_test(self, img, img_metas, meta, rescale=False):
         """Test function without test-time augmentation.
 
         Args:
-            img (torch.Tensor): Images with shape (B, C, H, W).
+            img (torch.Tensor): Images with shape (N, C, H, W).
             img_metas (list[dict]): List of image information.
             rescale (bool, optional): Whether to rescale the results.
                 Defaults to False.
 
         Returns:
-            list(tuple): Formatted bbox and mask results of multiple \
-                images. The outer list corresponds to each image. \
-                Each tuple contains two type of results of single image:
-
-                - bbox_results (list[np.ndarray]): BBox results of
-                  single image. The list corresponds to each class.
-                  each ndarray has a shape (N, 5), N is the number of
-                  bboxes with this category, and last dimension
-                  5 arrange as (x1, y1, x2, y2, scores).
-                - mask_results (list[np.ndarray]): Mask results of
-                  single image. The list corresponds to each class.
-                  each ndarray has a shape (N, img_h, img_w), N
-                  is the number of masks with this category.
+            list[list[np.ndarray]]: BBox results of each image and classes.
+                The outer list corresponds to each image. The inner list
+                corresponds to each class.
         """
         feat = self.extract_feat(img)
-        output = self.mask_head.test_pipe(feat)
+        output = self.bbox_head.test_pipe(feat)
         results_list = self.det_eval(meta, output)
         bbox_results = [
-            bbox2result(det_bboxes, det_labels, self.mask_head.num_classes)
+            bbox2result(det_bboxes, det_labels, self.bbox_head.num_classes)
             for det_bboxes, det_labels in results_list
         ]
-        mask_results_list = self.seg_eval(meta, output, img_metas)
-        mask_results = [
-            mask2result(seg_masks, seg_labels, self.mask_head.num_classes)
-            for seg_masks, seg_labels in mask_results_list
-        ]
-        format_results_list = []
-        for bbox_result, mask_result in zip(bbox_results, mask_results):
-            format_results_list.append((bbox_result, mask_result))
-
-        return format_results_list
+        return bbox_results
 
     def forward_test(self, imgs, img_metas, meta, **kwargs):
         """
