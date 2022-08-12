@@ -1,0 +1,1 @@
+/data/scratch/sjtu/tongzhao/e2ec_mmdetection/work_dirs/e2ec_is_resnet18_dcnv2_coco/e2ec_is_resnet18_dcnv2_coco.py

@@ -1,0 +1,304 @@
+wandb_version: 1
+
+_wandb:
+  desc: null
+  value:
+    cli_version: 0.13.1
+    framework: torch
+    is_jupyter_run: false
+    is_kaggle_kernel: false
+    python_version: 3.7.13
+    start_time: 1660296927.831401
+    t:
+      1:
+      - 1
+      - 37
+      - 38
+      - 41
+      - 55
+      2:
+      - 1
+      - 37
+      - 38
+      - 41
+      - 55
+      3:
+      - 3
+      - 13
+      - 23
+      4: 3.7.13
+      5: 0.13.1
+      8:
+      - 5
+auto_resume:
+  desc: null
+  value: false
+checkpoint_config:
+  desc: null
+  value:
+    interval: 1
+custom_hooks:
+  desc: null
+  value:
+  - type: NumClassCheckHook
+data:
+  desc: null
+  value:
+    samples_per_gpu: 16
+    test:
+      ann_file: ./dataset/coco/annotations/instances_val2017.json
+      img_prefix: ./dataset/coco/val2017/
+      pipeline:
+      - to_float32: true
+        type: LoadImageFromFile
+      - mode: test
+        type: Augment
+      - type: DefaultFormatBundle
+      - keys:
+        - img
+        - meta
+        meta_keys:
+        - filename
+        - ori_shape
+        - img_shape
+        - pad_shape
+        type: Collect
+      type: CocoDataset
+    train:
+      dataset:
+        ann_file: ./dataset/coco/annotations/instances_train2017.json
+        img_prefix: ./dataset/coco/train2017/
+        pipeline:
+        - color_type: color
+          to_float32: true
+          type: LoadImageFromFile
+        - type: LoadAnnotations
+          with_bbox: true
+          with_label: true
+          with_mask: true
+        - type: Contour
+        - type: DefaultFormatBundle
+        - keys:
+          - img
+          - gt_bboxes
+          - gt_masks
+          - gt_labels
+          - data_input
+          meta_keys:
+          - filename
+          - ori_filename
+          - ori_shape
+          - img_shape
+          type: Collect
+        type: CocoDataset
+      times: 5
+      type: RepeatDataset
+    val:
+      ann_file: ./dataset/coco/annotations/instances_val2017.json
+      img_prefix: ./dataset/coco/val2017/
+      pipeline:
+      - to_float32: true
+        type: LoadImageFromFile
+      - mode: test
+        type: Augment
+      - type: DefaultFormatBundle
+      - keys:
+        - img
+        - meta
+        meta_keys:
+        - filename
+        - ori_shape
+        - img_shape
+        - pad_shape
+        type: Collect
+      type: CocoDataset
+    workers_per_gpu: 4
+data_root:
+  desc: null
+  value: ./dataset/coco/
+dataset_type:
+  desc: null
+  value: CocoDataset
+dist_params:
+  desc: null
+  value:
+    backend: nccl
+evaluation:
+  desc: null
+  value:
+    interval: 1
+    metric:
+    - bbox
+    - segm
+gpu_ids:
+  desc: null
+  value:
+  - 0
+  - 1
+  - 2
+  - 3
+img_norm_cfg:
+  desc: null
+  value:
+    mean:
+    - 123.675
+    - 116.28
+    - 103.53
+    std:
+    - 58.395
+    - 57.12
+    - 57.375
+    to_rgb: true
+load_from:
+  desc: null
+  value: null
+log_config:
+  desc: null
+  value:
+    hooks:
+    - type: TextLoggerHook
+    - bbox_score_thr: 0.3
+      init_kwargs:
+        entity: iszhaotong
+        name: e2ec_is_resnet18_dcnv2_coco
+        project: e2ec
+      interval: 10
+      log_checkpoint: true
+      log_checkpoint_metadata: true
+      num_eval_images: 100
+      type: MMDetWandbHook
+    interval: 100
+log_level:
+  desc: null
+  value: INFO
+lr_config:
+  desc: null
+  value:
+    gamma: 0.5
+    policy: step
+    step:
+    - 16
+    - 24
+    warmup: linear
+    warmup_iters: 500
+    warmup_ratio: 0.001
+model:
+  desc: null
+  value:
+    backbone:
+      depth: 18
+      init_cfg:
+        checkpoint: torchvision://resnet18
+        type: Pretrained
+      norm_cfg:
+        type: BN
+      norm_eval: false
+      type: ResNet
+    mask_head:
+      feat_channel: 64
+      in_channel: 64
+      loss_center_heatmap:
+        loss_weight: 1.0
+        type: GaussianFocalLoss
+      loss_coarse:
+        loss_weight: 0.1
+        type: SmoothL1Loss
+      loss_init:
+        loss_weight: 0.1
+        type: SmoothL1Loss
+      loss_iter1:
+        loss_weight: 0.3333333333333333
+        type: SmoothL1Loss
+      loss_iter2:
+        loss_weight: 0.3333333333333333
+        type: DMLoss
+      num_classes: 80
+      type: E2ECHead
+    neck:
+      in_channel: 512
+      num_deconv_filters:
+      - 256
+      - 128
+      - 64
+      num_deconv_kernels:
+      - 4
+      - 4
+      - 4
+      type: CTResNetNeck
+      use_dcn: true
+    type: E2EC
+mp_start_method:
+  desc: null
+  value: fork
+opencv_num_threads:
+  desc: null
+  value: 0
+optimizer:
+  desc: null
+  value:
+    lr: 0.0001
+    type: Adam
+    weight_decay: 0.0005
+optimizer_config:
+  desc: null
+  value:
+    grad_clip:
+      max_norm: 35
+      norm_type: 2
+resume_from:
+  desc: null
+  value: null
+runner:
+  desc: null
+  value:
+    max_epochs: 28
+    type: EpochBasedRunner
+test_pipeline:
+  desc: null
+  value:
+  - to_float32: true
+    type: LoadImageFromFile
+  - mode: test
+    type: Augment
+  - type: DefaultFormatBundle
+  - keys:
+    - img
+    - meta
+    meta_keys:
+    - filename
+    - ori_shape
+    - img_shape
+    - pad_shape
+    type: Collect
+train_pipeline:
+  desc: null
+  value:
+  - color_type: color
+    to_float32: true
+    type: LoadImageFromFile
+  - type: LoadAnnotations
+    with_bbox: true
+    with_label: true
+    with_mask: true
+  - type: Contour
+  - type: DefaultFormatBundle
+  - keys:
+    - img
+    - gt_bboxes
+    - gt_masks
+    - gt_labels
+    - data_input
+    meta_keys:
+    - filename
+    - ori_filename
+    - ori_shape
+    - img_shape
+    type: Collect
+work_dir:
+  desc: null
+  value: ./work_dirs/e2ec_is_resnet18_dcnv2_coco
+workflow:
+  desc: null
+  value:
+  - - train
+    - 1

@@ -1,0 +1,31 @@
+{
+    "os": "Linux-5.15.0-43-generic-x86_64-with-debian-bullseye-sid",
+    "python": "3.7.13",
+    "heartbeatAt": "2022-08-12T09:31:13.839738",
+    "startedAt": "2022-08-12T09:31:13.090195",
+    "docker": null,
+    "gpu": "NVIDIA GeForce RTX 2080 Ti",
+    "gpu_count": 4,
+    "cpu_count": 24,
+    "cuda": null,
+    "args": [
+        "--local_rank=0",
+        "./configs/e2ec/e2ec_is_resnet18_dcnv2_coco.py",
+        "--seed",
+        "0",
+        "--launcher",
+        "pytorch"
+    ],
+    "state": "running",
+    "program": "./tools/train.py",
+    "codePath": "tools/train.py",
+    "git": {
+        "remote": "git@e.coding.net:dqwang/med/e2ec_mmdetection.git",
+        "commit": "96d5664e947f56afe0926ac5175152a56d10037e"
+    },
+    "email": null,
+    "root": "/data/scratch/sjtu/tongzhao/e2ec_mmdetection",
+    "host": "gpu0",
+    "username": "sjtu",
+    "executable": "/home/sjtu/anaconda3/envs/openmmlab/bin/python"
+}

@@ -2,6 +2,7 @@
 import torch
 from mmdet.core import bbox2result
 from mmdet.models.builder import DETECTORS
+from mmcv.runner import force_fp32, auto_fp16
 
 from ..builder import DETECTORS
 from .single_stage_instance_seg import SingleStageInstanceSegmentor
@@ -130,6 +131,8 @@ class E2EC(SingleStageInstanceSegmentor):
 
         self._cfg = cfg
 
+    @auto_fp16(apply_to=('data_input["inp"]','data_input["ct_hm"]','data_input["wh"]','data_input["ct_cls"]','data_input["ct_ind"]',
+                         'data_input["img_gt_polys"]','data_input["can_gt_polys"]','data_input["keyPointsMask"]'))
     def forward_train(self,
                       img,
                       img_metas,
@@ -161,6 +164,7 @@ class E2EC(SingleStageInstanceSegmentor):
                                                   gt_labels, data_input, gt_bboxes_ignore)
             return losses
 
+    @force_fp32(apply_to=('output["detection"]', 'output["py"]'))
     def det_eval(self, meta, output):
         detection = output['detection']
         detection = detection[0] if detection.dim() == 3 else detection
@@ -194,6 +198,7 @@ class E2EC(SingleStageInstanceSegmentor):
 
         return [(det_bboxes, det_labels)]
 
+    @force_fp32(apply_to=('output["detection"]', 'output["py"]'))
     def seg_eval(self, meta, output, img_metas):
         detection = output['detection']
         score = detection[:, 2].detach().cpu().numpy()
@@ -282,6 +287,7 @@ class E2EC(SingleStageInstanceSegmentor):
 
         return format_results_list
 
+    @auto_fp16(apply_to=('imgs', ))
     def forward_test(self, imgs, img_metas, meta, **kwargs):
         """
         Args:

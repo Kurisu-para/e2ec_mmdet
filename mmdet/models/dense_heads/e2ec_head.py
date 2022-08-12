@@ -9,7 +9,7 @@ from args import coco as cfg
 # from shapely.geometry import Polygon
 from mmcv.cnn import bias_init_with_prob, normal_init
 from mmcv.ops import batched_nms
-from mmcv.runner import force_fp32
+from mmcv.runner import force_fp32, auto_fp16
 
 from mmdet.core import multi_apply
 from mmdet.models import HEADS, build_loss
@@ -469,7 +469,8 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
                  loss_center_heatmap=dict(type='GaussianFocalLoss', loss_weight=1.0),
                  loss_init=dict(type='SmoothL1Loss', loss_weight=0.1),
                  loss_coarse=dict(type='SmoothL1Loss', loss_weight=0.1),
-                 loss_iter1=dict(type='SmoothL1Loss', loss_weight=1.0),
+                 loss_iter10=dict(type='SmoothL1Loss', loss_weight=1.0),
+                 loss_iter11=dict(type='SmoothL1Loss', loss_weight=1.0),
                  loss_iter2=dict(type='DMLoss', loss_weight=1.0),
                  train_cfg=None,
                  test_cfg=None,
@@ -489,7 +490,8 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
         self.loss_center_heatmap = build_loss(loss_center_heatmap)
         self.loss_init = build_loss(loss_init)
         self.loss_coarse = build_loss(loss_coarse)
-        self.loss_iter1 = build_loss(loss_iter1)
+        self.loss_iter10 = build_loss(loss_iter10)
+        self.loss_iter11 = build_loss(loss_iter11)
         self.loss_iter2 = build_loss(loss_iter2)
 
         self.cfg = cfg
@@ -610,7 +612,9 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
 
         return center_heatmap_pred, wh_pred, cnn_feature
 
-    @force_fp32(apply_to=('center_heatmap_preds', 'cnn_features'))
+    @force_fp32(apply_to=('data_input["ct_hm"]','data_input["keypoints_mask"]',
+                          'output["ct_hm"]','output["poly_init"]','output["poly_coarse"]','output["py_pred"]',
+                          'output["img_gt_polys"]'))
     def loss(self,
              cnn_features,
              output,
@@ -661,11 +665,11 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
             output['poly_coarse'],
             output['img_gt_polys'],
             reduction_override='mean')
-        loss_iter10 = self.loss_iter1(
+        loss_iter10 = self.loss_iter10(
             output['py_pred'][0],
             output['img_gt_polys'],
             reduction_override='mean')
-        loss_iter11 = self.loss_iter1(
+        loss_iter11 = self.loss_iter11(
             output['py_pred'][1],
             output['img_gt_polys'],
             reduction_override='mean')
