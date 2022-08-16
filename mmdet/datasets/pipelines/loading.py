@@ -1,21 +1,10 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import os.path as osp
-
 import mmcv
 import numpy as np
-import cv2
-import random
-import math
-import copy
 import pycocotools.mask as maskUtils
-from shapely.geometry import Polygon
-from torch.utils.data.dataloader import default_collate
-import torch
-
-
 from mmdet.core import BitmapMasks, PolygonMasks
 from ..builder import PIPELINES
-
 try:
     from panopticapi.utils import rgb2id
 except ImportError:

@@ -1,19 +1,12 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import torch
 from mmdet.core import bbox2result
-from mmdet.models.builder import DETECTORS
 from mmcv.runner import force_fp32, auto_fp16
-
 from ..builder import DETECTORS
 from .single_stage_instance_seg import SingleStageInstanceSegmentor
-
-from ...core.utils import flip_tensor
-from .single_stage import SingleStageDetector
 import pycocotools.mask as mask_utils
 import numpy as np
 import cv2
-import random
-from shapely.geometry import Polygon
 from args import coco as cfg
 
 def coco_poly_to_rle(poly, h, w):
@@ -131,16 +124,9 @@ class E2EC(SingleStageInstanceSegmentor):
 
         self._cfg = cfg
 
-    @auto_fp16(apply_to=('data_input["inp"]','data_input["ct_hm"]','data_input["wh"]','data_input["ct_cls"]','data_input["ct_ind"]',
-                         'data_input["img_gt_polys"]','data_input["can_gt_polys"]','data_input["keyPointsMask"]'))
-    def forward_train(self,
-                      img,
-                      img_metas,
-                      gt_bboxes,
-                      gt_masks,
-                      gt_labels,
-                      data_input,
-                      gt_bboxes_ignore=None):
+    # @auto_fp16(apply_to=('data_input["inp"]','data_input["ct_hm"]','data_input["wh"]','data_input["ct_cls"]','data_input["ct_ind"]',
+    #                      'data_input["img_gt_polys"]','data_input["can_gt_polys"]','data_input["keyPointsMask"]'))
+    def forward_train(self, data_input):
             """
             Args:
                 img (Tensor): Input images of shape (N, C, H, W).
@@ -160,11 +146,10 @@ class E2EC(SingleStageInstanceSegmentor):
                 dict[str, Tensor]: A dictionary of loss components.
             """
             x = self.extract_feat(data_input['inp'])
-            losses = self.mask_head.forward_train(x, img_metas, gt_bboxes, gt_masks,
-                                                  gt_labels, data_input, gt_bboxes_ignore)
+            losses = self.mask_head.forward_train(x, data_input)
             return losses
 
-    @force_fp32(apply_to=('output["detection"]', 'output["py"]'))
+    # @force_fp32(apply_to=('output["detection"]', 'output["py"]'))
     def det_eval(self, meta, output):
         detection = output['detection']
         detection = detection[0] if detection.dim() == 3 else detection
@@ -198,7 +183,7 @@ class E2EC(SingleStageInstanceSegmentor):
 
         return [(det_bboxes, det_labels)]
 
-    @force_fp32(apply_to=('output["detection"]', 'output["py"]'))
+    # @force_fp32(apply_to=('output["detection"]', 'output["py"]'))
     def seg_eval(self, meta, output, img_metas):
         detection = output['detection']
         score = detection[:, 2].detach().cpu().numpy()
@@ -215,35 +200,11 @@ class E2EC(SingleStageInstanceSegmentor):
         trans_output_inv = get_affine_transform(center, scale, 0, [w, h], inv=1)
         ori_h, ori_w, ori_c = img_metas['ori_shape']
         py = [affine_transform(py_, trans_output_inv) for py_ in py]
-        # rles = coco_poly_to_rle(py, ori_h, ori_w)
         masks = [polygons_to_mask(ori_h, ori_w, p) for p in py]
         seg_masks = np.array(masks)
         seg_labels = label
 
         return [(seg_masks, seg_labels)]
-
-    # def simple_test(self, img, img_metas, meta, rescale=False): #纯detection
-    #     """Test function without test-time augmentation.
-    #
-    #     Args:
-    #         img (torch.Tensor): Images with shape (N, C, H, W).
-    #         img_metas (list[dict]): List of image information.
-    #         rescale (bool, optional): Whether to rescale the results.
-    #             Defaults to False.
-    #
-    #     Returns:
-    #         list[list[np.ndarray]]: BBox results of each image and classes.
-    #             The outer list corresponds to each image. The inner list
-    #             corresponds to each class.
-    #     """
-    #     feat = self.extract_feat(img)
-    #     output = self.mask_head.test_pipe(feat)
-    #     results_list = self.det_eval(meta, output)
-    #     bbox_results = [
-    #         bbox2result(det_bboxes, det_labels, self.bbox_head.num_classes)
-    #         for det_bboxes, det_labels in results_list
-    #     ]
-    #     return bbox_results
 
     def simple_test(self, img, img_metas, meta, rescale=False):
         """Test function without test-time augmentation.
@@ -287,7 +248,7 @@ class E2EC(SingleStageInstanceSegmentor):
 
         return format_results_list
 
-    @auto_fp16(apply_to=('imgs', ))
+    # @auto_fp16(apply_to=('imgs', ))
     def forward_test(self, imgs, img_metas, meta, **kwargs):
         """
         Args:
@@ -314,3 +275,23 @@ class E2EC(SingleStageInstanceSegmentor):
         else:
             # TODO: support test-time augmentation
             assert NotImplementedError
+
+    @auto_fp16(apply_to=('img',))
+    def forward(self, img, img_metas, return_loss=True, **kwargs):
+        """Calls either :func:`forward_train` or :func:`forward_test` depending
+        on whether ``return_loss`` is ``True``.
+
+        Note this setting will change the expected inputs. When
+        ``return_loss=True``, img and img_meta are single-nested (i.e. Tensor
+        and List[dict]), and when ``resturn_loss=False``, img and img_meta
+        should be double nested (i.e.  List[Tensor], List[List[dict]]), with
+        the outer list indicating test time augmentations.
+        """
+        if torch.onnx.is_in_onnx_export():
+            assert len(img_metas) == 1
+            return self.onnx_export(img[0], img_metas[0])
+
+        if return_loss:
+            return self.forward_train(**kwargs)
+        else:
+            return self.forward_test(img, img_metas, **kwargs)

@@ -20,23 +20,28 @@ from mmdet.core.mask.structures import polygon_to_bitmap
 @HOOKS.register_module()
 class MMDetWandbHook(WandbLoggerHook):
     """Enhanced Wandb logger hook for MMDetection.
+
     Comparing with the :cls:`mmcv.runner.WandbLoggerHook`, this hook can not
     only automatically log all the metrics but also log the following extra
     information - saves model checkpoints as W&B Artifact, and
     logs model prediction as interactive W&B Tables.
+
     - Metrics: The MMDetWandbHook will automatically log training
         and validation metrics along with system metrics (CPU/GPU).
+
     - Checkpointing: If `log_checkpoint` is True, the checkpoint saved at
         every checkpoint interval will be saved as W&B Artifacts.
         This depends on the : class:`mmcv.runner.CheckpointHook` whose priority
         is higher than this hook. Please refer to
         https://docs.wandb.ai/guides/artifacts/model-versioning
         to learn more about model versioning with W&B Artifacts.
+
     - Checkpoint Metadata: If evaluation results are available for a given
         checkpoint artifact, it will have a metadata associated with it.
         The metadata contains the evaluation metrics computed on validation
         data with that checkpoint along with the current epoch. It depends
         on `EvalHook` whose priority is more than MMDetWandbHook.
+
     - Evaluation: At every evaluation interval, the `MMDetWandbHook` logs the
         model prediction as interactive W&B Tables. The number of samples
         logged is given by `num_eval_images`. Currently, the `MMDetWandbHook`
@@ -46,8 +51,10 @@ class MMDetWandbHook(WandbLoggerHook):
         and subsequent evaluation tables uses reference to the logged data
         to save memory usage. Please refer to
         https://docs.wandb.ai/guides/data-vis to learn more about W&B Tables.
+
     For more details check out W&B's MMDetection docs:
     https://docs.wandb.ai/guides/integrations/mmdetection
+
     ```
     Example:
         log_config = dict(
@@ -66,6 +73,7 @@ class MMDetWandbHook(WandbLoggerHook):
                      bbox_score_thr=0.3)
             ])
     ```
+
     Args:
         init_kwargs (dict): A dict passed to wandb.init to initialize
             a W&B run. Please refer to https://docs.wandb.ai/ref/python/init
@@ -285,6 +293,7 @@ class MMDetWandbHook(WandbLoggerHook):
 
     def _log_ckpt_as_artifact(self, model_path, aliases, metadata=None):
         """Log model checkpoint as  W&B Artifact.
+
         Args:
             model_path (str): Path of the checkpoint to log.
             aliases (list): List of the aliases associated with this artifact.
@@ -449,11 +458,13 @@ class MMDetWandbHook(WandbLoggerHook):
 
     def _get_wandb_bboxes(self, bboxes, labels, log_gt=True):
         """Get list of structured dict for logging bounding boxes to W&B.
+
         Args:
             bboxes (list): List of bounding box coordinates in
                         (minX, minY, maxX, maxY) format.
             labels (int): List of label ids.
             log_gt (bool): Whether to log ground truth or prediction boxes.
+
         Returns:
             Dictionary of bounding boxes to be logged.
         """
@@ -504,6 +515,7 @@ class MMDetWandbHook(WandbLoggerHook):
                          height=None,
                          width=None):
         """Get list of structured dict for logging masks to W&B.
+
         Args:
             masks (list): List of masks.
             labels (int): List of label ids.
@@ -511,6 +523,7 @@ class MMDetWandbHook(WandbLoggerHook):
                 This is true for CocoDataset.
             height (int): Height of the image.
             width (int): Width of the image.
+
         Returns:
             Dictionary of masks to be logged.
         """
@@ -547,6 +560,7 @@ class MMDetWandbHook(WandbLoggerHook):
         """Log the W&B Tables for validation data as artifact and calls
         `use_artifact` on it so that the evaluation table can use the reference
         of already uploaded images.
+
         This allows the data to be uploaded just once.
         """
         data_artifact = self.wandb.Artifact('val', type='dataset')
@@ -559,6 +573,7 @@ class MMDetWandbHook(WandbLoggerHook):
 
     def _log_eval_table(self, idx):
         """Log the W&B Tables for model evaluation.
+
         The table will be logged multiple times creating new version. Use this
         to compare models at different intervals interactively.
         """

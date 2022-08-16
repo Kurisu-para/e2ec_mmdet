@@ -7,15 +7,14 @@ log_config = dict(
     interval=100,
     hooks=[
         dict(type='TextLoggerHook'),
-        # dict(type='TensorboardLoggerHook')
-        dict(
-            type='MMDetWandbHook',
-            init_kwargs={'entity':'iszhaotong', 'project':'e2ec', 'name':'e2ec_is_resnet18_dcnv2_coco'},
-            interval=10,
-            log_checkpoint=True,
-            log_checkpoint_metadata=True,
-            num_eval_images=100,
-            bbox_score_thr=0.3)
+        # dict(
+        #     type='MMDetWandbHook',
+        #     init_kwargs={'entity':'iszhaotong', 'project':'e2ec', 'name':'e2ec_is_resnet18_dcnv2_coco'},
+        #     interval=10,
+        #     log_checkpoint=True,
+        #     log_checkpoint_metadata=True,
+        #     num_eval_images=100,
+        #     bbox_score_thr=0.3)
         ])
 model = dict(
     type='E2EC',
@@ -46,11 +45,10 @@ model = dict(
 
 train_pipeline = [
     dict(type='LoadImageFromFile', to_float32=True, color_type='color'),
-    dict(type='LoadAnnotations', with_bbox=True, with_label=True, with_mask=True),
+    dict(type='LoadAnnotations', with_bbox=False, with_label=True),
     dict(type='Contour'),
     dict(type='DefaultFormatBundle'),
-    dict(type='Collect', keys=['img', 'gt_bboxes', 'gt_masks', 'gt_labels', 'data_input'],
-         meta_keys=('filename', 'ori_filename', 'ori_shape', 'img_shape'))
+    dict(type='Collect', keys=['img', 'data_input'], meta_keys=())
 ]
 
 test_pipeline = [
@@ -66,7 +64,7 @@ dataset_type = 'CocoDataset'
 data_root = './dataset/coco/'
 
 data = dict(
-    samples_per_gpu=20,
+    samples_per_gpu=24,
     workers_per_gpu=4,
     train=dict(
         _delete_=True,
@@ -89,15 +87,34 @@ data = dict(
             pipeline=test_pipeline))
 evaluation = dict(interval=1, metric=['bbox', 'segm'])
 
-optimizer = dict(_delete_=True, type='Adam', lr=1e-4, weight_decay=5e-4)
+# optimizer = dict(_delete_=True, type='Adam', lr=1e-4, weight_decay=5e-4)
+# optimizer_config = dict(
+#     _delete_=True, grad_clip=dict(max_norm=35, norm_type=2))
+#
+# lr_config = dict(
+#     policy='step',
+#     step=[16, 24],
+#     gamma=0.5)
+# workflow = [('train', 1)]
+# runner = dict(max_epochs=28)
+# # fp16 = dict(loss_scale=512.)
+# # fp16 = dict(loss_scale='dynamic')
+
+
+# CenterNet Strategy
+# optimizer
+# Based on the default settings of modern detectors, the SGD effect is better
+# than the Adam in the source code, so we use SGD default settings and
+# if you use adam+lr5e-4, the map is 29.1.
 optimizer_config = dict(
     _delete_=True, grad_clip=dict(max_norm=35, norm_type=2))
 
+# learning policy
+# Based on the default settings of modern detectors, we added warmup settings.
 lr_config = dict(
     policy='step',
-    step=[16, 24],
-    gamma=0.5)
-
-workflow = [('train', 1)]
-runner = dict(max_epochs=28)
-fp16 = dict(loss_scale=512.)
+    warmup='linear',
+    warmup_iters=1000,
+    warmup_ratio=1.0 / 1000,
+    step=[18, 24])  # the real step is [18*5, 24*5]
+runner = dict(max_epochs=28)  # the real epoch is 28*5=140

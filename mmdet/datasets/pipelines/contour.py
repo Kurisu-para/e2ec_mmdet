@@ -1,16 +1,8 @@
-import os.path as osp
-import mmcv
 import numpy as np
 import cv2
 import random
 import math
-import copy
-import pycocotools.mask as maskUtils
 from shapely.geometry import Polygon
-from torch.utils.data.dataloader import default_collate
-import torch
-
-from mmdet.core import BitmapMasks, PolygonMasks
 from ..builder import PIPELINES
 
 try:
@@ -492,13 +484,12 @@ class Contour:
         h, w = results['img_info']['height'], results['img_info']['width']
         gt_labels = results['ann_info']['labels']
         gt_masks = results['ann_info']['masks']
-        gt_contour_masks = copy.deepcopy(gt_masks)
 
         img = results['img']
         assert img.shape[1] == w and img.shape[0] == h
         width, height = img.shape[1], img.shape[0]
 
-        instance_polys = [[np.array(poly).reshape(-1, 2) for poly in instance] for instance in gt_contour_masks]
+        instance_polys = [[np.array(poly).reshape(-1, 2) for poly in instance] for instance in gt_masks]
         cls_ids = gt_labels.tolist()
 
         image_id = results['img_info']['id']

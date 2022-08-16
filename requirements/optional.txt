@@ -3,3 +3,5 @@ imagecorruptions
 scipy
 sklearn
 timm
+shapely
+wandb
