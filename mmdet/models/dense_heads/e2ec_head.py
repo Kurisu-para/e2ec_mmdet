@@ -26,7 +26,7 @@ class CircConv(nn.Module):
         return self.fc(input)
 
 class DilatedCircConv(nn.Module):
-    def __init__(self, state_dim, out_state_dim=None, n_adj=4, dilation=1):   # state_dim=128, feature_dim=64+2, conv_type='dgrid'
+    def __init__(self, state_dim, out_state_dim=None, n_adj=4, dilation=1):
         super(DilatedCircConv, self).__init__()
 
         self.n_adj = n_adj
@@ -111,7 +111,7 @@ def collect_training(poly, ct_01):
     poly = torch.cat([poly[i][ct_01[i]] for i in range(batch_size)], dim=0)
     return poly
 
-def prepare_training(ret, batch, ro):  # output, batch, self.ro = 4.
+def prepare_training(ret, batch, ro):
     ct_01 = batch['ct_01'].byte()
     init = {}
 
@@ -141,7 +141,6 @@ def get_gcn_feature(cnn_feature, img_poly, ind, h, w):
     img_poly = img_poly.clone()
     img_poly[..., 0] = img_poly[..., 0] / (w / 2.) - 1
     img_poly[..., 1] = img_poly[..., 1] / (h / 2.) - 1
-
     batch_size = cnn_feature.size(0)
     gcn_feature = torch.zeros([img_poly.size(0), cnn_feature.size(1), img_poly.size(1)]).to(img_poly.device)
     for i in range(batch_size):
@@ -319,19 +318,7 @@ def clip_to_image(poly, h, w):
     poly[..., 1] = torch.clamp(poly[..., 1], max=h-1)
     return poly
 
-def get_gcn_feature(cnn_feature, img_poly, ind, h, w): #feature shape [16, 64, 128, 128], points shape [154,128+1,2], ct_img_idx, h, w
-    img_poly = img_poly.clone()
-    img_poly[..., 0] = img_poly[..., 0] / (w / 2.) - 1
-    img_poly[..., 1] = img_poly[..., 1] / (h / 2.) - 1
-    batch_size = cnn_feature.size(0)
-    gcn_feature = torch.zeros([img_poly.size(0), cnn_feature.size(1), img_poly.size(1)]).to(img_poly.device)
-    for i in range(batch_size):
-        poly = img_poly[ind == i].unsqueeze(0)
-        feature = torch.nn.functional.grid_sample(cnn_feature[i:i+1], poly)[0].permute(1, 0, 2)
-        gcn_feature[ind == i] = feature
-    return gcn_feature
-
-class Refine(torch.nn.Module):  # cnn_feature, ct, init_polys, ct_img_idx.clone()
+class Refine(torch.nn.Module):
     def __init__(self, c_in=64, num_point=128, stride=4.):
         super(Refine, self).__init__()
         self.num_point = num_point
@@ -354,16 +341,16 @@ class Refine(torch.nn.Module):  # cnn_feature, ct, init_polys, ct_img_idx.clone(
         return coarse_polys
 
     def forward(self, feature, ct_polys, init_polys, ct_img_idx,
-                ignore=False):  # feature=cnn_feature, ct_polys=ct, init_polys=init_polys, ct_img_idx=ct_img_idx.clone()
+                ignore=False):
         if ignore or len(init_polys) == 0:
             return init_polys
         h, w = feature.size(2), feature.size(3)
         poly_num = ct_polys.size(0)
 
-        feature = self.trans_feature(feature)  # [16,64,128,128] -> [16,64,128,128]
+        feature = self.trans_feature(feature)
 
         ct_polys = ct_polys.unsqueeze(1).expand(init_polys.size(0), 1, init_polys.size(2))
-        points = torch.cat([ct_polys, init_polys], dim=1)  # [154,128+1,2] 中心点和边框点的坐标
+        points = torch.cat([ct_polys, init_polys], dim=1)
         feature_points = get_gcn_feature(feature, points, ct_img_idx, h, w).view(poly_num, -1)
         coarse_polys = self.global_deform(feature_points, init_polys)
         return coarse_polys
@@ -488,7 +475,7 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
 
         self.cfg = cfg
 
-        self.test_stage = self.cfg.test.test_stage #'final-dml'
+        self.test_stage = self.cfg.test.test_stage
 
         self.train_decoder = Decode(num_point=self.cfg.commen.points_per_poly, init_stride=self.cfg.model.init_stride,
                                     coarse_stride=self.cfg.model.coarse_stride, down_sample=self.cfg.commen.down_ratio,
@@ -576,13 +563,13 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
 
         data_input = None # 空数据走test
 
-        with torch.no_grad(): #测试阶段不需要梯度
+        with torch.no_grad():
             if self.test_stage == 'init':
                 ignore = True
             else:
                 ignore = False
             self.train_decoder(data_input, cnn_features, output, is_training=False, ignore_gloabal_deform=ignore)
-        output = self.gcn(output, cnn_features, data_input, test_stage=self.cfg.test.test_stage) #output已经更新了poly_init和poly_coarse 图网络
+        output = self.gcn(output, cnn_features, data_input, test_stage=self.cfg.test.test_stage)
 
         return output
 

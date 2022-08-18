@@ -9,7 +9,7 @@ log_config = dict(
         dict(type='TextLoggerHook'),
         # dict(
         #     type='MMDetWandbHook',
-        #     init_kwargs={'entity':'iszhaotong', 'project':'e2ec', 'name':'e2ec_is_resnet18_dcnv2_coco'},
+        #     init_kwargs={'entity':'iszhaotong', 'project':'e2ec', 'name':'e2ec_is_resnet18_dcnv2_minicoco'},
         #     interval=10,
         #     log_checkpoint=True,
         #     log_checkpoint_metadata=True,
@@ -19,16 +19,12 @@ log_config = dict(
 model = dict(
     type='E2EC',
     backbone=dict(
-        type='ResNet',
-        depth=18,
-        norm_eval=False,
-        norm_cfg=dict(type='BN'),
-        init_cfg=dict(type='Pretrained', checkpoint='torchvision://resnet18')),
-    neck=dict(
-        type='CTResNetNeck',
-        in_channel=512,
-        num_deconv_filters=(256, 128, 64),
-        num_deconv_kernels=(4, 4, 4),
+        type='DLASeg',
+        base_name='dla34',
+        pretrained=True,
+        down_ratio=4,
+        last_level=5,
+        out_channel=0,
         use_dcn=True),
     mask_head=dict(
         type='E2ECHead',
@@ -90,7 +86,6 @@ evaluation = dict(interval=1, metric=['bbox', 'segm'])
 # optimizer = dict(_delete_=True, type='Adam', lr=1e-4, weight_decay=5e-4)
 # optimizer_config = dict(
 #     _delete_=True, grad_clip=dict(max_norm=35, norm_type=2))
-#
 # lr_config = dict(
 #     policy='step',
 #     step=[16, 24],
@@ -98,8 +93,6 @@ evaluation = dict(interval=1, metric=['bbox', 'segm'])
 # workflow = [('train', 1)]
 # runner = dict(max_epochs=28)
 # # fp16 = dict(loss_scale=512.)
-# # fp16 = dict(loss_scale='dynamic')
-
 
 # CenterNet Strategy
 # optimizer
@@ -117,7 +110,9 @@ lr_config = dict(
     warmup_ratio=1.0 / 1000,
     step=[18, 24])  # the real step is [18*5, 24*5]
 runner = dict(max_epochs=28)  # the real epoch is 28*5=140
+
 # NOTE: `auto_scale_lr` is for automatically scaling LR,
 # USER SHOULD NOT CHANGE ITS VALUES.
 # base_batch_size = (GPUs) x (samples per GPU)
 auto_scale_lr = dict(base_batch_size=160)
+# find_unused_parameters = True
