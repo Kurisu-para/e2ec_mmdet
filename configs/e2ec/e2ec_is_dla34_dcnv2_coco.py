@@ -120,3 +120,9 @@ runner = dict(max_epochs=28)  # the real epoch is 28*5=140
 # # base_batch_size = (8 GPUs) x (16 samples per GPU)
 # auto_scale_lr = dict(base_batch_size=128)
 find_unused_parameters = True
+custom_hooks = [
+    dict(
+        type='E2ECModeSwitchHook',
+        start_epochs=2, # the real epoch is 2*5
+        priority=48)
+]

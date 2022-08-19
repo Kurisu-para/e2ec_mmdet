@@ -1,5 +1,5 @@
 _base_ = [
-    '../_base_/datasets/coco_instance.py',
+    '../_base_/datasets/cityscapes_instance.py',
     '../_base_/schedules/schedule_1x.py',
     '../_base_/default_runtime.py'
 ]
@@ -17,8 +17,9 @@ log_config = dict(
         #     bbox_score_thr=0.3)
         ])
 
-dataset_type = 'CocoDataset'
-data_root = './dataset/coco/'
+dataset_type = 'CityscapesDataset'
+data_root = '/home/sjtu/scratch/tongzhao/e2ec_mmdetection/dataset/cityscapes/'
+ann_root = '/home/sjtu/scratch/tongzhao/data/cityscapes/'
 
 model = dict(
     type='E2EC',
@@ -32,7 +33,7 @@ model = dict(
         use_dcn=True),
     mask_head=dict(
         type='E2ECHead',
-        num_classes=80,
+        num_classes=8,
         in_channel=64,
         feat_channel=64,
         loss_center_heatmap=dict(type='GaussianFocalLoss', loss_weight=1.0),
@@ -71,18 +72,18 @@ data = dict(
         times=5,
         dataset=dict(
             type=dataset_type,
-            ann_file=data_root + 'annotations/instances_train2017.json',
-            img_prefix=data_root + 'train2017/',
+            ann_file=ann_root + 'annotations/instancesonly_filtered_gtFine_train.json',
+            img_prefix=data_root + 'leftImg8bit/train/',
             pipeline=train_pipeline)),
     val=dict(
             type=dataset_type,
-            ann_file=data_root + 'annotations/instances_val2017.json',
-            img_prefix=data_root + 'val2017/',
+            ann_file=ann_root + 'annotations/instancesonly_filtered_gtFine_val.json',
+            img_prefix=data_root + 'leftImg8bit/val/',
             pipeline=test_pipeline),
     test=dict(
             type=dataset_type,
-            ann_file=data_root + 'annotations/instances_val2017.json',
-            img_prefix=data_root + 'val2017/',
+            ann_file=ann_root + 'annotations/instancesonly_filtered_gtFine_test.json',
+            img_prefix=data_root + 'leftImg8bit/test/',
             pipeline=test_pipeline))
 evaluation = dict(interval=1, metric=['bbox', 'segm'])
 
@@ -102,7 +103,7 @@ evaluation = dict(interval=1, metric=['bbox', 'segm'])
 # Based on the default settings of modern detectors, the SGD effect is better
 # than the Adam in the source code, so we use SGD default settings and
 # if you use adam+lr5e-4, the map is 29.1.
-optimizer = dict(type='SGD', lr=0.01875, momentum=0.9, weight_decay=0.0001) # 0.02*(12*10/16*8)=0.01875
+optimizer = dict(type='SGD', lr=0.02, momentum=0.9, weight_decay=0.0001)
 optimizer_config = dict(
     _delete_=True, grad_clip=dict(max_norm=35, norm_type=2))
 # learning policy
@@ -112,8 +113,8 @@ lr_config = dict(
     warmup='linear',
     warmup_iters=1000,
     warmup_ratio=1.0 / 1000,
-    step=[18, 24])  # the real step is [18*5, 24*5]
-runner = dict(max_epochs=28)  # the real epoch is 28*5=140
+    step=[18, 24, 32])  # the real step is [18*5, 24*5, 32*5]
+runner = dict(max_epochs=40)  # the real epoch is 28*5=140
 
 # # NOTE: `auto_scale_lr` is for automatically scaling LR,
 # # USER SHOULD NOT CHANGE ITS VALUES.

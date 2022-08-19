@@ -462,6 +462,7 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
         self.loss_coarse = build_loss(loss_coarse)
         self.loss_iter10 = build_loss(loss_iter10)
         self.loss_iter11 = build_loss(loss_iter11)
+        self.use_dm = False  # This flag will be modified by hooks.
         self.loss_iter2 = build_loss(loss_iter2)
 
         self.test_stage = self._cfg.test.test_stage
@@ -636,21 +637,23 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
             output['py_pred'][1],
             output['img_gt_polys'],
             reduction_override='mean')
-        loss_iter2 = self.loss_iter2(
-            output['py_pred'][-2],
-            output['py_pred'][-1],
-            output['img_gt_polys'],
-            keyPointsMask,
-            reduction_override='mean')
-
-        return dict(
+        loss_dict = dict(
             loss_center_heatmap=loss_center_heatmap,
             loss_init=loss_init,
             loss_coarse=loss_coarse,
             loss_iter10=loss_iter10,
-            loss_iter11=loss_iter11,
-            loss_iter2=loss_iter2
-            )
+            loss_iter11=loss_iter11
+        )
+        if self.use_dm:
+            loss_iter2 = self.loss_iter2(
+                output['py_pred'][-2],
+                output['py_pred'][-1],
+                output['img_gt_polys'],
+                keyPointsMask,
+                reduction_override='mean')
+            loss_dict.update(loss_iter2=loss_iter2)
+
+        return loss_dict
     
     def forward_train(self,
                       x,

@@ -7,10 +7,11 @@ from .sync_random_size_hook import SyncRandomSizeHook
 from .wandblogger_hook import MMDetWandbHook
 from .yolox_lrupdater_hook import YOLOXLrUpdaterHook
 from .yolox_mode_switch_hook import YOLOXModeSwitchHook
+from .e2ec_mode_switch_hook import E2ECModeSwitchHook
 
 __all__ = [
     'SyncRandomSizeHook', 'YOLOXModeSwitchHook', 'SyncNormHook',
     'ExpMomentumEMAHook', 'LinearMomentumEMAHook', 'YOLOXLrUpdaterHook',
     'CheckInvalidLossHook', 'SetEpochInfoHook',
-    'MMDetWandbHook'
+    'MMDetWandbHook', 'E2ECModeSwitchHook'
 ]

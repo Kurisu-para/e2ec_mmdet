@@ -99,3 +99,10 @@ workflow = [('train', 1)]
 runner = dict(max_epochs=28)
 # fp16 = dict(loss_scale=512.)
 find_unused_parameters = True
+
+custom_hooks = [
+    dict(
+        type='E2ECModeSwitchHook',
+        start_epochs=2, # the real epoch is 2*5
+        priority=48)
+]
