@@ -7,7 +7,7 @@ from .single_stage_instance_seg import SingleStageInstanceSegmentor
 import pycocotools.mask as mask_utils
 import numpy as np
 import cv2
-from args import coco as cfg
+import importlib
 
 def coco_poly_to_rle(poly, h, w):
     rle_ = []
@@ -108,6 +108,7 @@ class E2EC(SingleStageInstanceSegmentor):
                  neck=None,
                  bbox_head=None,
                  mask_head=None,
+                 dataset_cfg=None,
                  train_cfg=None,
                  test_cfg=None,
                  init_cfg=None,
@@ -122,7 +123,8 @@ class E2EC(SingleStageInstanceSegmentor):
             init_cfg=init_cfg,
             pretrained=pretrained)
 
-        self._cfg = cfg
+        dataset_dict = {'CocoDataset': 'coco', 'CityscapesDataset': 'cityscapes'}
+        self._cfg = importlib.import_module('args.' + dataset_dict[dataset_cfg['type']])
 
     # @auto_fp16(apply_to=('data_input["inp"]','data_input["ct_hm"]','data_input["wh"]','data_input["ct_cls"]','data_input["ct_ind"]',
     #                      'data_input["img_gt_polys"]','data_input["can_gt_polys"]','data_input["keyPointsMask"]'))

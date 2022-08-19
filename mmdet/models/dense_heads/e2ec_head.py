@@ -1,7 +1,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import torch
 import torch.nn as nn
-from args import coco as cfg
+import importlib
 from mmcv.cnn import bias_init_with_prob, normal_init
 
 from mmdet.core import multi_apply
@@ -158,13 +158,13 @@ def prepare_testing_init(polys, ro):
     return init
 
 class Evolution(nn.Module):
-    def __init__(self, evole_ietr_num=3, evolve_stride=1., ro=4.):
+    def __init__(self, evole_iter_num=3, evolve_stride=1., ro=4.):
         super(Evolution, self).__init__()
-        assert evole_ietr_num >= 1
+        assert evole_iter_num >= 1
         self.evolve_stride = evolve_stride
         self.ro = ro
         self.evolve_gcn = Snake(state_dim=128, feature_dim=64 + 2, conv_type='dgrid')
-        self.iter = evole_ietr_num - 1  # 2
+        self.iter = evole_iter_num - 1  # 2
         for i in range(self.iter):
             evolve_gcn = Snake(state_dim=128, feature_dim=64 + 2, conv_type='dgrid')
             self.__setattr__('evolve_gcn' + str(i), evolve_gcn)
@@ -191,7 +191,7 @@ class Evolution(nn.Module):
         return img_init_polys
 
     def evolve_poly(self, snake, cnn_feature, i_it_poly, c_it_poly, ind, stride=1.,
-                    ignore=False):  # evolve_gcn, cnn_feature, py_pred, c_py_pred, init['py_ind'], stride=self.evolve_stride
+                    ignore=False):
         if ignore:
             return i_it_poly * self.ro
         if len(i_it_poly) == 0:
@@ -435,36 +435,27 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
     """
 
     def __init__(self,
-                 in_channel, #64
-                 feat_channel, #64
-                 num_classes, #80 coco
-                 points_per_poly = 128,
-                 down_sample = 4.,
-                 init_stride=10.,
-                 coarse_stride=4.,
-                 min_ct_score=0.05,
-                 evole_ietr_num=3,
-                 evolve_stride=1,
+                 num_classes,
+                 in_channel,
+                 feat_channel,
                  loss_center_heatmap=dict(type='GaussianFocalLoss', loss_weight=1.0),
                  loss_init=dict(type='SmoothL1Loss', loss_weight=0.1),
                  loss_coarse=dict(type='SmoothL1Loss', loss_weight=0.1),
                  loss_iter10=dict(type='SmoothL1Loss', loss_weight=1.0),
                  loss_iter11=dict(type='SmoothL1Loss', loss_weight=1.0),
                  loss_iter2=dict(type='DMLoss', loss_weight=1.0),
+                 dataset_type=None,
                  train_cfg=None,
                  test_cfg=None,
                  init_cfg=None):
         super(E2ECHead, self).__init__(init_cfg)
+
+        dataset_dict = {'CocoDataset': 'coco', 'CityscapesDataset': 'cityscapes'}
+        self._cfg = importlib.import_module('args.' + dataset_dict[dataset_type])
+
         self.num_classes = num_classes
-        self.down_sample = down_sample
-        self.points_per_poly = points_per_poly
-        self.init_stride = init_stride
-        self.coarse_stride = coarse_stride
-        self.min_ct_score = min_ct_score
-        self.evole_ietr_num = evole_ietr_num
-        self.evolve_stride = evolve_stride
         self.heatmap_head = self._build_head(in_channel, feat_channel, num_classes)
-        self.wh_head = self._build_head(in_channel, feat_channel, 2 * points_per_poly)
+        self.wh_head = self._build_head(in_channel, feat_channel, 2 * self._cfg.commen.points_per_poly)
 
         self.loss_center_heatmap = build_loss(loss_center_heatmap)
         self.loss_init = build_loss(loss_init)
@@ -473,15 +464,13 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
         self.loss_iter11 = build_loss(loss_iter11)
         self.loss_iter2 = build_loss(loss_iter2)
 
-        self.cfg = cfg
+        self.test_stage = self._cfg.test.test_stage
 
-        self.test_stage = self.cfg.test.test_stage
-
-        self.train_decoder = Decode(num_point=self.cfg.commen.points_per_poly, init_stride=self.cfg.model.init_stride,
-                                    coarse_stride=self.cfg.model.coarse_stride, down_sample=self.cfg.commen.down_ratio,
-                                    min_ct_score=self.cfg.test.ct_score)
-        self.gcn = Evolution(evole_ietr_num=self.cfg.model.evolve_iters, evolve_stride=self.cfg.model.evolve_stride,
-                             ro=self.cfg.commen.down_ratio)
+        self.train_decoder = Decode(num_point=self._cfg.commen.points_per_poly, init_stride=self._cfg.model.init_stride,
+                                    coarse_stride=self._cfg.model.coarse_stride, down_sample=self._cfg.commen.down_ratio,
+                                    min_ct_score=self._cfg.test.ct_score)
+        self.gcn = Evolution(evole_iter_num=self._cfg.model.evolve_iters, evolve_stride=self._cfg.model.evolve_stride,
+                             ro=self._cfg.commen.down_ratio)
 
         self.train_cfg = train_cfg
         self.test_cfg = test_cfg
@@ -531,7 +520,7 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
         output['wh'] = wh_preds
 
         self.train_decoder(data_input, cnn_features, output, is_training=True)
-        output = self.gcn(output, cnn_features, data_input, test_stage=self.cfg.test.test_stage)
+        output = self.gcn(output, cnn_features, data_input, test_stage=self._cfg.test.test_stage)
 
         return (output, )
 
@@ -569,7 +558,7 @@ class E2ECHead(BaseDenseHead, BBoxTestMixin):
             else:
                 ignore = False
             self.train_decoder(data_input, cnn_features, output, is_training=False, ignore_gloabal_deform=ignore)
-        output = self.gcn(output, cnn_features, data_input, test_stage=self.cfg.test.test_stage)
+        output = self.gcn(output, cnn_features, data_input, test_stage=self._cfg.test.test_stage)
 
         return output
 

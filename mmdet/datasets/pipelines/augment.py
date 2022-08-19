@@ -1,10 +1,9 @@
 import numpy as np
 import cv2
 import random
+import importlib
 from shapely.geometry import Polygon
 from mmdet.datasets import PIPELINES
-from args import coco as cfg
-
 
 def get_3rd_point(a, b):
     direct = a - b
@@ -157,8 +156,9 @@ def augment(img, split, _data_rng, _eig_val, _eig_vec, mean, std,
 
 @PIPELINES.register_module()
 class Augment:
-    def __init__(self, mode='test'):
-        self._cfg = cfg
+    def __init__(self, mode='test', dataset_type=None):
+        dataset_dict = {'CocoDataset': 'coco', 'CityscapesDataset': 'cityscapes'}
+        self._cfg = importlib.import_module('args.' + dataset_dict[dataset_type])
         self.mode = mode
 
     def __call__(self, results):

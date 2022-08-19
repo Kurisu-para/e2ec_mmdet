@@ -2,6 +2,7 @@ import numpy as np
 import cv2
 import random
 import math
+import importlib
 from shapely.geometry import Polygon
 from ..builder import PIPELINES
 
@@ -9,9 +10,6 @@ try:
     from panopticapi.utils import rgb2id
 except ImportError:
     rgb2id = None
-
-from args import coco as cfg
-
 
 class Douglas:
     D = 3
@@ -50,8 +48,9 @@ class Douglas:
 
 @PIPELINES.register_module()
 class Contour:
-    def __init__(self):
-        self._cfg = cfg
+    def __init__(self, dataset_type=None):
+        dataset_dict = {'CocoDataset': 'coco', 'CityscapesDataset': 'cityscapes'}
+        self._cfg = importlib.import_module('args.' + dataset_dict[dataset_type])
         self.d = Douglas()
 
     def get_border(self, border, size):

@@ -16,6 +16,10 @@ log_config = dict(
         #     num_eval_images=100,
         #     bbox_score_thr=0.3)
         ])
+
+dataset_type = 'CocoDataset'
+data_root = '/home/sjtu/scratch/tongzhao/minicoco/'
+
 model = dict(
     type='E2EC',
     backbone=dict(
@@ -40,28 +44,27 @@ model = dict(
         loss_coarse=dict(type='SmoothL1Loss', loss_weight=0.1),
         loss_iter10=dict(type='SmoothL1Loss', loss_weight=1/3),
         loss_iter11=dict(type='SmoothL1Loss', loss_weight=1/3),
-        loss_iter2=dict(type='DMLoss', loss_weight=1/3))
+        loss_iter2=dict(type='DMLoss', loss_weight=1/3),
+        dataset_type=dataset_type),
+    dataset_cfg=dict(type=dataset_type)
 )
 
 train_pipeline = [
     dict(type='LoadImageFromFile', to_float32=True, color_type='color'),
     dict(type='LoadAnnotations', with_bbox=False, with_label=True),
-    dict(type='Contour'),
+    dict(type='Contour', dataset_type=dataset_type),
     dict(type='DefaultFormatBundle'),
     dict(type='Collect', keys=['img', 'data_input'], meta_keys=())
 ]
 
 test_pipeline = [
     dict(type='LoadImageFromFile', to_float32=True),
-    dict(type='Augment', mode='test'),
+    dict(type='Augment', mode='test', dataset_type=dataset_type),
     dict(type='DefaultFormatBundle'),
     dict(type='Collect',
          meta_keys=('filename', 'ori_shape', 'img_shape', 'pad_shape'),
          keys=['img', 'meta'])
 ]
-
-dataset_type = 'CocoDataset'
-data_root = '/home/sjtu/scratch/tongzhao/minicoco/'
 
 data = dict(
     samples_per_gpu=24,

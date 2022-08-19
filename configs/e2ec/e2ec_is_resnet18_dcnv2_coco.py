@@ -16,6 +16,10 @@ log_config = dict(
         #     num_eval_images=100,
         #     bbox_score_thr=0.3)
         ])
+
+dataset_type = 'CocoDataset'
+data_root = './dataset/coco/'
+
 model = dict(
     type='E2EC',
     backbone=dict(
@@ -40,32 +44,31 @@ model = dict(
         loss_coarse=dict(type='SmoothL1Loss', loss_weight=0.1),
         loss_iter10=dict(type='SmoothL1Loss', loss_weight=1/3),
         loss_iter11=dict(type='SmoothL1Loss', loss_weight=1/3),
-        loss_iter2=dict(type='DMLoss', loss_weight=1/3))
+        loss_iter2=dict(type='DMLoss', loss_weight=1/3),
+        dataset_type=dataset_type),
+    dataset_cfg=dict(type=dataset_type)
 )
 
 train_pipeline = [
     dict(type='LoadImageFromFile', to_float32=True, color_type='color'),
     dict(type='LoadAnnotations', with_bbox=False, with_label=True),
-    dict(type='Contour'),
+    dict(type='Contour', dataset_type=dataset_type),
     dict(type='DefaultFormatBundle'),
     dict(type='Collect', keys=['img', 'data_input'], meta_keys=())
 ]
 
 test_pipeline = [
     dict(type='LoadImageFromFile', to_float32=True),
-    dict(type='Augment', mode='test'),
+    dict(type='Augment', mode='test', dataset_type=dataset_type),
     dict(type='DefaultFormatBundle'),
     dict(type='Collect',
          meta_keys=('filename', 'ori_shape', 'img_shape', 'pad_shape'),
          keys=['img', 'meta'])
 ]
 
-dataset_type = 'CocoDataset'
-data_root = './dataset/coco/'
-
 data = dict(
     samples_per_gpu=16,
-    workers_per_gpu=4,
+    workers_per_gpu=5,
     train=dict(
         _delete_=True,
         type='RepeatDataset',
@@ -106,6 +109,7 @@ evaluation = dict(interval=1, metric=['bbox', 'segm'])
 # Based on the default settings of modern detectors, the SGD effect is better
 # than the Adam in the source code, so we use SGD default settings and
 # if you use adam+lr5e-4, the map is 29.1.
+optimizer = dict(type='SGD', lr=0.025, momentum=0.9, weight_decay=0.0001) # 0.02*(16*10/16*8)=0.025
 optimizer_config = dict(
     _delete_=True, grad_clip=dict(max_norm=35, norm_type=2))
 # learning policy
@@ -117,7 +121,7 @@ lr_config = dict(
     warmup_ratio=1.0 / 1000,
     step=[18, 24])  # the real step is [18*5, 24*5]
 runner = dict(max_epochs=28)  # the real epoch is 28*5=140
-# NOTE: `auto_scale_lr` is for automatically scaling LR,
-# USER SHOULD NOT CHANGE ITS VALUES.
-# base_batch_size = (GPUs) x (samples per GPU)
-auto_scale_lr = dict(base_batch_size=160)
+# # NOTE: `auto_scale_lr` is for automatically scaling LR,
+# # USER SHOULD NOT CHANGE ITS VALUES.
+# # base_batch_size = (8 GPUs) x (16 samples per GPU)
+# auto_scale_lr = dict(base_batch_size=128)
